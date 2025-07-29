@@ -1,0 +1,142 @@
+---
+title: "Phylogenetic Tree Plot for NoV and RoV"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r}
+# Load necessary packages
+library(ape)
+library(ggplot2)
+library(dplyr)
+library(rprojroot)
+library(treeio)
+library(ggtree)
+library(ggtreeExtra)
+library(RColorBrewer)
+library(ggnewscale)
+library(eoffice)
+
+# Function to process one sample
+plot_phylo_tree <- function(prefix) {
+  # File paths
+  tree_file <- sprintf("%s/data/%s.treefile", find_rstudio_root_file(), prefix)
+  annotation_file <- sprintf("%s/data/%s_label_annotation.tsv", find_rstudio_root_file(), prefix)
+  
+  # Read tree and annotation
+  tree <- read.tree(tree_file)
+  annotation <- read.table(annotation_file, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+  
+  # Assign bootstrap
+  bs_tree <- treeio::read.iqtree(tree_file)
+  tree$node.label <- bs_tree@phylo$node.label
+  
+  # Tip label replacement
+  original_labels <- tree$tip.label
+  matching_indices <- match(annotation$node, original_labels)
+  new_labels <- original_labels
+  for (i in seq_along(matching_indices)) {
+    if (!is.na(matching_indices[i])) {
+      new_labels[matching_indices[i]] <- annotation$label[i]
+    }
+  }
+  tree$tip.label <- new_labels
+  
+  # Categorize RPKMF
+  annotation <- annotation %>%
+    mutate(
+      RPKMF_cat = case_when(
+        RPKMF > 0 & RPKMF <= 10 ~ "10",
+        RPKMF > 10 & RPKMF <= 100 ~ "100",
+        RPKMF > 100 & RPKMF <= 1000 ~ "1000",
+        RPKMF > 1000 ~ "10000",
+        TRUE ~ NA_character_
+      )
+    )
+  
+  # Define RPKMF visual settings
+  cns_colors <- c("#91D1C2", "#00A087", "#F39B7F", "#E64B35")
+  rpkmf_colors <- setNames(cns_colors, c("10", "100", "1000", "10000"))
+  rpkmf_sizes <- c("10" = 2, "100" = 4, "1000" = 6, "10000" = 8)
+  
+  # Prepare RPKMF data
+  rpkmf_data <- annotation %>% filter(!is.na(RPKMF_cat))
+  tree_data <- ggtree(tree)$data
+  tree_height <- max(tree_data$x, na.rm = TRUE)
+  tip_coords <- tree_data %>% filter(isTip) %>% select(label, x, y)
+  rpkmf_data <- left_join(rpkmf_data, tip_coords, by = "label") %>%
+    mutate(size = rpkmf_sizes[RPKMF_cat], fill = rpkmf_colors[RPKMF_cat])
+  
+  # Prepare coverage data
+  coverage_data <- annotation %>% select(label, coverage) %>% rename(value = coverage) %>% filter(value > 0)
+  coverage_fill <- c("Coverage" = "#4DBBD5")
+  
+  # Group data
+  group_df <- data.frame(label = tree$tip.label)
+  group_df$group <- annotation$group[match(group_df$label, annotation$label)]
+  group_df$group[is.na(group_df$group)] <- "unknown"
+  group_df$group <- factor(group_df$group, levels = c("consensus", "reference", "unknown"))
+  node_colors <- c("consensus" = "#d62728", "reference" = "#1f77b4", "unknown" = "gray")
+  
+  # Bootstrap nodes
+  tree_bs_data <- ggtree(bs_tree)$data %>%
+    filter(!isTip) %>%
+    mutate(bootstrap = as.numeric(label)) %>%
+    filter(!is.na(bootstrap) & bootstrap >= 70)
+  
+  # --- First plot: RPKMF Bubble + Coverage Bar ---
+  p1 <- ggtree(tree, layout = "rectangular", size = 1.2) +
+    geom_point(data = rpkmf_data, aes(x = x, y = y, size = RPKMF_cat, fill = RPKMF_cat),
+               shape = 21, color = "black", stroke = 0.2, show.legend = TRUE) +
+    scale_size_manual(name = "RPKMF", values = rpkmf_sizes) +
+    scale_fill_manual(name = "RPKMF", values = rpkmf_colors) +
+    new_scale_fill() +
+    geom_fruit(
+      data = coverage_data,
+      geom = geom_col,
+      mapping = aes(y = label, x = value, fill = "Coverage"),
+      orientation = "y",
+      width = 0.35,
+      pwidth = 0.13,
+      offset = 0.01,
+      inherit.aes = FALSE
+    ) +
+    geom_fruit(
+      data = coverage_data,
+      geom = geom_text,
+      mapping = aes(y = label, x = 0, label = round(value, 1)),
+      hjust = 0,
+      size = 4,
+      offset = 0.01,
+      inherit.aes = FALSE
+    ) +
+    scale_fill_manual(name = "Metric", values = coverage_fill, guide = guide_legend(order = 2)) +
+    theme(legend.position = "right") +
+    geom_treescale(x = tree_height * 1.02, y = 0, fontsize = 4, linesize = 1)
+  
+  # --- Second plot: Labels and Bootstrap only ---
+  p2 <- ggtree(tree, layout = "rectangular", size = 1.2) %<+% group_df +
+    geom_tiplab(aes(label = label, color = group), align = TRUE, size = 4, offset = 0) +
+    scale_color_manual(values = node_colors, name = "Group") +
+    geom_point(data = tree_bs_data, aes(x = x, y = y), shape = 21, fill = "#CC79A7", size = 6.5) +
+    theme(legend.position = "right", legend.direction = "vertical",
+          legend.text = element_text(size = 14), legend.title = element_text(size = 14)) +
+    labs(color = "Group") +
+    geom_treescale(x = tree_height * 1.02, y = 0, fontsize = 4, linesize = 1)
+  
+  # Save to disk
+  output_dir <- sprintf("%s/charts", find_rstudio_root_file())
+  dir.create(output_dir, showWarnings = FALSE)
+  
+  ggsave(file.path(output_dir, sprintf("%s_bubble_coverage_plot.pdf", prefix)), plot = p1, width = 9, height = 9)
+  topptx(p1, file = file.path(output_dir, sprintf("%s_bubble_coverage_plot.pptx", prefix)), width = 9, height = 9)
+  
+  ggsave(file.path(output_dir, sprintf("%s_label_bootstrap_plot.pdf", prefix)), plot = p2, width = 9, height = 9)
+  topptx(p2, file = file.path(output_dir, sprintf("%s_label_bootstrap_plot.pptx", prefix)), width = 9, height = 9)
+}
+
+# Run for both input samples
+plot_phylo_tree("noro_aln")
+plot_phylo_tree("rota_aln")
+```

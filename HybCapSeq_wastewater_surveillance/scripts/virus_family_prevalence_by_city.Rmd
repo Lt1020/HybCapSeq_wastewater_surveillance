@@ -1,0 +1,89 @@
+---
+title: "Look at different virus prevalence by City"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+
+```{r}
+# Load necessary libraries
+library(ggplot2)
+library(data.table)
+library(stringr)
+library(dplyr)
+library(lubridate)
+library(wesanderson)
+library(tidyr)
+library(rprojroot)
+library(eoffice)
+
+# Set paths and filenames
+virome_table <- sprintf(
+  "%s/data/wastewater_virome_abundance_table1.tsv", 
+  find_rstudio_root_file()
+)
+metadata_table <- sprintf(
+  "%s/data/wastewater_sample_metadata_table1.tsv", 
+  find_rstudio_root_file()
+)
+
+# Merge abundance and metadata tables
+virome_dt <- fread(virome_table, sep = "\t", header = TRUE)
+meta_dt <- fread(metadata_table, sep = "\t", header = TRUE)
+virome_met_dt <- merge(virome_dt, meta_dt, by = "sample_ID")
+virome_met_dt$City_Site <- str_c(virome_met_dt$City, ", ", virome_met_dt$Site)
+
+# Calculate virus prevalence by city
+city_prev_dt <- virome_met_dt %>%
+  group_by(City) %>%
+  mutate(total_samples = n_distinct(sample_ID)) %>%
+  ungroup() %>%
+  group_by(strain, City, total_samples) %>%
+  summarize(n = n_distinct(sample_ID)) %>%
+  mutate(freq = n / total_samples) %>%
+  ungroup() %>%
+  select(strain, City, freq) %>%
+  pivot_wider(names_from = City, values_from = freq, values_fill = 0)
+
+# Plot prevalence in Guangzhou and Nanning
+city_prev_dt %>%
+  ggplot(aes(x = Guangzhou, y = Nanning, size = (Guangzhou+Nanning))) +
+  geom_point(alpha = 0.5)
+
+# Extract taxonomic information
+tax_table <- virome_dt %>%
+  select(c("kingdom", "phylum", "class", 
+           "order", "family", "genus", 
+           "species", "strain")) %>%
+  distinct()
+
+# Merge prevalence and taxonomic information
+city_prev_tax_dt <- merge(city_prev_dt, tax_table, by = "strain")
+
+# Create a plot of virus prevalence by family
+prevp <- city_prev_tax_dt %>%
+  filter(family != "NA") %>%
+  ungroup() %>%
+  distinct() %>%
+  ggplot() +
+  geom_point(aes(x = Guangzhou, y = Nanning, size = (Nanning+Guangzhou), fill = family), 
+             alpha = 0.6, stroke = 1, shape = 21, color = "black") +
+  scale_size(range = c(0.1, 5)) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dotted") +
+  facet_wrap(~family) +
+  theme_bw() +
+  labs(x = "Guangzhou prevalence", y = "Nanning prevalence") +
+  theme(legend.position = "Off",
+        axis.text.x = element_text(angle = 90, hjust = -0.2))
+
+# Print the plot
+prevp
+
+# Save the plot as a PDF file
+ggsave(prevp, file = sprintf("%s/charts/families_by_city.pdf", find_rstudio_root_file()), width = 8, height = 8)
+
+# Save the plot as a PPTX file
+pptx_filename <- sprintf("%s/charts/families_by_city.pptx", find_rstudio_root_file())
+topptx(prevp, filename = pptx_filename, height = 8, width = 8)
+```

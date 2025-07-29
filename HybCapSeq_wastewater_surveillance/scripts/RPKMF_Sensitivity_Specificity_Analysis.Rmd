@@ -1,0 +1,162 @@
+---
+title: "Sensitivity and Specificity Analysis"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(knitr)
+library(flextable)
+library(officer)
+library(binom)
+library(stats)
+library(rprojroot)
+
+## Data Import and Preprocessing
+
+# Load the data
+data <- read.delim(sprintf("%s/data/sars-cov2_date_site_genome_copies_RPKMF.tsv", find_rstudio_root_file()))
+
+# Define positivity based on criteria, ensure all levels are present
+data <- data %>% 
+  mutate(
+    qPCR_result = factor(ifelse(genome_copies > 0, "Positive", "Negative"), levels = c("Positive", "Negative")),
+    RPKMF_result = factor(ifelse(RPKMF > 0, "Positive", "Negative"), levels = c("Positive", "Negative")),
+    Coverage_result = factor(ifelse(coverage > 0, "Positive", "Negative"), levels = c("Positive", "Negative"))
+  )
+
+
+## Function for Sensitivity and Specificity Calculation
+
+calculate_stats <- function(tp, fn, tn, fp) {
+  # Handle division by zero cases
+  sensitivity <- ifelse((tp + fn) > 0, tp / (tp + fn), 0)
+  specificity <- ifelse((tn + fp) > 0, tn / (tn + fp), 0)
+
+  # 95% CI using binomial exact method, handle zero cases
+  if ((tp + fn) > 0) {
+    sens_ci <- binom.confint(tp, tp + fn, method = "exact")
+  } else {
+    sens_ci <- list(lower = 0, upper = 0)
+  }
+  
+  if ((tn + fp) > 0) {
+    spec_ci <- binom.confint(tn, tn + fp, method = "exact")
+  } else {
+    spec_ci <- list(lower = 0, upper = 0)
+  }
+
+  # Fisher's Exact Test for P-value, handle edge cases
+  contingency_matrix <- matrix(c(tp, fn, fp, tn), nrow = 2)
+  # Check if any dimension is zero
+  if (any(dim(contingency_matrix) == 0)) {
+    p_value <- 1  # Default to non-significant if no data
+  } else {
+    p_value <- tryCatch({
+      fisher.test(contingency_matrix)$p.value
+    }, error = function(e) {
+      1  # Default to non-significant if test fails
+    })
+  }
+  p_value <- ifelse(p_value < 0.001, "P<0.001", sprintf("%.3f", p_value))
+
+  return(list(
+    sensitivity = round(sensitivity, 3),
+    specificity = round(specificity, 3),
+    sens_ci = paste0(round(sens_ci$lower, 3), "-", round(sens_ci$upper, 3)),
+    spec_ci = paste0(round(spec_ci$lower, 3), "-", round(spec_ci$upper, 3)),
+    p_value = p_value
+  ))
+}
+
+
+## 2x2 Contingency Tables and Calculations
+
+# RPKMF vs qPCR
+RPKMF_table <- table(data$qPCR_result, data$RPKMF_result)
+
+# Coverage vs qPCR
+coverage_table <- table(data$qPCR_result, data$Coverage_result)
+
+# Ensure contingency tables have all combinations using proper addmargins
+# Create empty 2x2 tables with all possible combinations
+full_table <- matrix(0, nrow = 2, ncol = 2, 
+                    dimnames = list(c("Positive", "Negative"), 
+                                    c("Positive", "Negative")))
+
+# Add observed values to the full table
+if(nrow(RPKMF_table) > 0 && ncol(RPKMF_table) > 0) {
+  for(r in rownames(RPKMF_table)) {
+    for(c in colnames(RPKMF_table)) {
+      full_table[r, c] <- RPKMF_table[r, c]
+    }
+  }
+}
+RPKMF_table <- full_table
+
+# Repeat for coverage table
+full_table <- matrix(0, nrow = 2, ncol = 2, 
+                    dimnames = list(c("Positive", "Negative"), 
+                                    c("Positive", "Negative")))
+if(nrow(coverage_table) > 0 && ncol(coverage_table) > 0) {
+  for(r in rownames(coverage_table)) {
+    for(c in colnames(coverage_table)) {
+      full_table[r, c] <- coverage_table[r, c]
+    }
+  }
+}
+coverage_table <- full_table
+
+# Sensitivity and Specificity
+RPKMF_stats <- calculate_stats(
+  RPKMF_table["Positive", "Positive"], 
+  RPKMF_table["Positive", "Negative"], 
+  RPKMF_table["Negative", "Negative"], 
+  RPKMF_table["Negative", "Positive"]
+)
+
+coverage_stats <- calculate_stats(
+  coverage_table["Positive", "Positive"], 
+  coverage_table["Positive", "Negative"], 
+  coverage_table["Negative", "Negative"], 
+  coverage_table["Negative", "Positive"]
+)
+
+## Create Summary Tables
+
+# RPKMF Table
+RPKMF_summary <- data.frame(
+  Metric = c("True Positive", "False Negative", "True Negative", "False Positive", 
+             "Sensitivity", "95% CI (Sensitivity)", "Specificity", "95% CI (Specificity)", "P-value"),
+  Value = c(RPKMF_table["Positive", "Positive"], RPKMF_table["Positive", "Negative"], 
+            RPKMF_table["Negative", "Negative"], RPKMF_table["Negative", "Positive"], 
+            RPKMF_stats$sensitivity, RPKMF_stats$sens_ci, 
+            RPKMF_stats$specificity, RPKMF_stats$spec_ci, RPKMF_stats$p_value)
+)
+
+# Coverage Table
+coverage_summary <- data.frame(
+  Metric = c("True Positive", "False Negative", "True Negative", "False Positive", 
+             "Sensitivity", "95% CI (Sensitivity)", "Specificity", "95% CI (Specificity)", "P-value"),
+  Value = c(coverage_table["Positive", "Positive"], coverage_table["Positive", "Negative"], 
+            coverage_table["Negative", "Negative"], coverage_table["Negative", "Positive"], 
+            coverage_stats$sensitivity, coverage_stats$sens_ci, 
+            coverage_stats$specificity, coverage_stats$spec_ci, coverage_stats$p_value)
+)
+
+## Export to Word Document
+
+# Create a Word document
+doc <- read_docx()
+
+doc <- doc %>% 
+  body_add_par("Sensitivity and Specificity Analysis", style = "heading 1") %>% 
+  body_add_par("RPKMF vs qPCR Results", style = "heading 2") %>% 
+  body_add_flextable(flextable(RPKMF_summary)) %>% 
+  body_add_par("Coverage vs qPCR Results", style = "heading 2") %>% 
+  body_add_flextable(flextable(coverage_summary))
+
+# Save the document
+print(doc, target = sprintf("%s/charts/RPKMF_Sensitivity_Specificity_Analysis.docx", find_rstudio_root_file()))
+
+```

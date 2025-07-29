@@ -1,0 +1,264 @@
+---
+title: "Comparison of Bacterial Classification between Captured and Non-captured Sequencing"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r}
+# Load necessary libraries
+library(tidyverse)
+library(ggplot2)
+library(RColorBrewer)
+library(vegan)
+library(rprojroot)
+library(eoffice) # For PPTX output
+
+# Read data files
+cap_file <- sprintf("%s/data/metaphlan_cap_merged_abundance_table.txt", find_rstudio_root_file())
+nocap_file <- sprintf("%s/data/metaphlan_nocap_merged_abundance_table.txt", find_rstudio_root_file())
+
+# Read data, skip first line
+cap_data <- read.table(cap_file, header = TRUE, skip = 1)
+nocap_data <- read.table(nocap_file, header = TRUE, skip = 1)
+
+# List of samples
+samples <- c("WS_0717_DXL", "WS_0717_HCZ", "WS_0717_RHN", "WS_0717_SLZ", "WS_0717_SY", "WS_0717_ZHGC",
+             "WS_0724_DXL", "WS_0724_HCZ", "WS_0724_RHN", "WS_0724_SLZ", "WS_0724_SY", "WS_0724_ZHGC",
+             "WS_0731_RHN", "WS_0731_SY", "WS_0731_ZHGC", "WS_0807_RHN", "WS_0807_SY", "WS_0807_ZHGC",
+             "WS_0814_RHN", "WS_0814_SY", "WS_0814_ZHGC")
+
+# Function to select samples and add suffix
+select_and_add_suffix <- function(data, suffix) {
+  new_data <- data %>% select(clade_name)
+  for (sample in samples) {
+    if (sample %in% colnames(data)) {
+      new_data[[paste0(sample, suffix)]] <- data[[sample]]
+    } else {
+      new_data[[paste0(sample, suffix)]] <- 0
+    }
+  }
+  return(new_data)
+}
+
+# Select samples and add suffixes
+cap_selected <- select_and_add_suffix(cap_data, "_cap")
+nocap_selected <- select_and_add_suffix(nocap_data, "_nocap")
+
+# Combine data
+combined_data <- full_join(cap_selected, nocap_selected, by = "clade_name") %>%
+  replace(is.na(.), 0)
+
+# Function to extract taxonomic level data
+extract_level <- function(data, level) {
+  level_patterns <- list(
+    "kingdom" = "k__[^|]+",
+    "phylum" = "p__[^|]+",
+    "class" = "c__[^|]+",
+    "order" = "o__[^|]+",
+    "family" = "f__[^|]+",
+    "genus" = "g__[^|]+",
+    "species" = "s__[^|]+")
+  
+  pattern <- level_patterns[[level]]
+  if (is.null(pattern)) {
+    stop("Invalid taxonomic level specified.")
+  }
+  
+  data %>%
+    filter(str_detect(clade_name, pattern) & str_count(clade_name, "\\|") == which(names(level_patterns) == level) - 1) %>%
+    mutate(level_name = str_extract(clade_name, pattern)) %>%
+    select(-clade_name) %>%
+    group_by(level_name) %>%
+    summarise_all(sum) %>%
+    column_to_rownames(var = "level_name") %>%
+    t() %>%
+    as.data.frame()
+}
+
+# Define taxonomic levels
+levels <- c("kingdom", "phylum", "class", "order", "family", "genus", "species")
+
+# Color palette
+cns_colors <- c("#E64B35", "#4DBBD5", "#00A087", "#3C5488", "#F39B7F", "#8491B4", "#91D1C2", "#DC0000", "#7E6148", "#B09C85")
+
+# Loop through each taxonomic level
+for (level in levels) {
+  # Extract data for current level
+  level_data <- extract_level(combined_data, level)
+  
+  # Check if data is empty
+  if (nrow(level_data) == 0) {
+    warning(paste("No data available for level", level, ". Skipping this level."))
+    next
+  }
+  
+  # Split data into cap and non-cap groups
+  cap_samples <- level_data[grep("_cap", rownames(level_data)), ]
+  nocap_samples <- level_data[grep("_nocap", rownames(level_data)), ]
+  
+  # Ensure sample names match between groups
+  cap_sample_names <- gsub("_cap", "", rownames(cap_samples))
+  nocap_sample_names <- gsub("_nocap", "", rownames(nocap_samples))
+  
+  # Find common samples
+  common_samples <- intersect(cap_sample_names, nocap_sample_names)
+  
+  # Subset data to include only common samples
+  cap_samples_common <- cap_samples[cap_sample_names %in% common_samples, ]
+  nocap_samples_common <- nocap_samples[nocap_sample_names %in% common_samples, ]
+  
+  # Sort samples to ensure order matches
+  cap_samples_common <- cap_samples_common[order(cap_sample_names[cap_sample_names %in% common_samples]), ]
+  nocap_samples_common <- nocap_samples_common[order(nocap_sample_names[nocap_sample_names %in% common_samples]), ]
+  
+  # Check if there are enough common samples
+  if (nrow(cap_samples_common) < 3 || nrow(nocap_samples_common) < 3) {
+    warning(paste("Not enough common samples for level", level, ". Skipping analysis."))
+    next
+  }
+  
+  # Perform PCoA on both groups
+  cap_bray_dist <- vegdist(cap_samples_common, method = "bray")
+  nocap_bray_dist <- vegdist(nocap_samples_common, method = "bray")
+  
+  # Replace NA and Inf values with 0
+  cap_bray_dist[is.na(cap_bray_dist) | is.infinite(cap_bray_dist)] <- 0
+  nocap_bray_dist[is.na(nocap_bray_dist) | is.infinite(nocap_bray_dist)] <- 0
+  
+  # Perform PCoA
+  cap_pcoa <- cmdscale(cap_bray_dist, k = 2, eig = TRUE)
+  nocap_pcoa <- cmdscale(nocap_bray_dist, k = 2, eig = TRUE)
+  
+  # Check if PCoA results are valid
+  if (is.null(cap_pcoa$points) || nrow(cap_pcoa$points) == 0 || 
+      is.null(nocap_pcoa$points) || nrow(nocap_pcoa$points) == 0) {
+    warning(paste("PCoA result for level", level, "is invalid. Skipping this level."))
+    next
+  }
+  
+  # Prepare data frames for plotting
+  cap_pcoa_df <- as.data.frame(cap_pcoa$points)
+  colnames(cap_pcoa_df) <- c("PC1", "PC2")
+  cap_pcoa_df$sample <- rownames(cap_samples_common)
+  cap_pcoa_df$method <- "HybCapSeq"
+  
+  nocap_pcoa_df <- as.data.frame(nocap_pcoa$points)
+  colnames(nocap_pcoa_df) <- c("PC1", "PC2")
+  nocap_pcoa_df$sample <- rownames(nocap_samples_common)
+  nocap_pcoa_df$method <- "MetaT"
+  
+  # Perform Procrustes analysis for plotting
+  proc_result <- procrustes(cap_pcoa$points, nocap_pcoa$points, scale = TRUE)
+  
+  # Perform Protest analysis for statistical significance
+  set.seed(1234)
+  protest_result <- protest(cap_pcoa$points, nocap_pcoa$points, permutations = 999, scale = TRUE)
+  
+  # Extract protest results
+  protest_corr <- protest_result$t0  # Correlation coefficient r
+  protest_p_value <- protest_result$signif  # P-value
+  
+  # Create transformed data frame for plotting
+  transformed_nocap <- as.data.frame(proc_result$Yrot)
+  colnames(transformed_nocap) <- c("PC1", "PC2")
+  transformed_nocap$sample <- rownames(nocap_samples_common)
+  transformed_nocap$method <- "MetaT"  # Renamed from "MetaT (Transformed)" for legend
+  
+  # Combine original and transformed data for plotting
+  plot_data <- rbind(
+    cap_pcoa_df %>% select(PC1, PC2, sample, method),
+    transformed_nocap %>% select(PC1, PC2, sample, method)
+  )
+  
+  # Extract sampling site information
+  plot_data$sampling_site <- gsub(".*(DXL|HCZ|RHN|SLZ|SY|ZHGC).*", "\\1", plot_data$sample)
+  
+  # Calculate PC1 and PC2 percentages for both groups
+  cap_pc1_percent <- round(100 * cap_pcoa$eig[1] / sum(cap_pcoa$eig), 2)
+  cap_pc2_percent <- round(100 * cap_pcoa$eig[2] / sum(cap_pcoa$eig), 2)
+  
+  # Determine plot limits for annotation positioning
+  x_min <- min(plot_data$PC1)
+  x_max <- max(plot_data$PC1)
+  y_min <- min(plot_data$PC2)
+  y_max <- max(plot_data$PC2)
+  
+  # Create annotation text
+  annotation_text <- paste(
+    "Protest Analysis:\n",
+    "r = ", format(protest_corr, digits = 3), "\n",
+    "P = ", ifelse(protest_p_value < 0.001, "<0.001", format(protest_p_value, digits = 3)),
+    sep = ""
+  )
+  
+  # Plot Procrustes superimposition
+  procrustes_plot <- ggplot(plot_data, aes(x = PC1, y = PC2, color = method, shape = sampling_site)) +
+    geom_point(size = 4) +
+    # Add arrows connecting original and transformed points
+    geom_segment(
+      data = data.frame(
+        x = cap_pcoa_df$PC1,
+        y = cap_pcoa_df$PC2,
+        xend = transformed_nocap$PC1,
+        yend = transformed_nocap$PC2,
+        sampling_site = gsub(".*(DXL|HCZ|RHN|SLZ|SY|ZHGC).*", "\\1", cap_pcoa_df$sample),
+        method = "Connection"
+      ),
+      aes(x = x, y = y, xend = xend, yend = yend, group = sampling_site),
+      linetype = "dashed",
+      alpha = 0.5,
+      color = "gray50"
+    ) +
+    # Add r and p value annotation
+    annotate(
+      "text", 
+      x = x_min + 0.05 * (x_max - x_min),  # Position on left side
+      y = y_max - 0.05 * (y_max - y_min),  # Position on top
+      label = annotation_text,
+      hjust = 0, 
+      vjust = 1, 
+      size = 4,
+      fontface = "bold",
+      color = "black",
+      fill = alpha("white", 0.8),
+      box.colour = "gray80",
+      box.linetype = 1,
+      box.size = 0.3
+    ) +
+    labs(
+      x = paste0("PC1 (", cap_pc1_percent, "%)"),
+      y = paste0("PC2 (", cap_pc2_percent, "%)"),
+      color = "Sequencing Method",
+      shape = "Sampling Site"
+    ) +
+    scale_color_manual(
+      values = c("HybCapSeq" = cns_colors[1], "MetaT" = cns_colors[2], "Connection" = "gray50"),
+      labels = c("HybCapSeq", "MetaT")  # Ensure legend shows correct labels
+    ) +
+    scale_shape_manual(values = c(DXL = 15, HCZ = 16, RHN = 17, SLZ = 18, SY = 8, ZHGC = 9)) +
+    theme_bw(base_size = 14) +
+    theme(
+      axis.text = element_text(size = 12),
+      axis.title = element_text(size = 14, face = "bold"),
+      legend.title = element_text(size = 14, face = "bold"),
+      legend.text = element_text(size = 12),
+      plot.title = element_blank(),  # Remove title
+      plot.subtitle = element_blank(),  # Remove subtitle
+      plot.margin = unit(c(1, 1, 1, 1), "cm")  # Adjust plot margins
+    )
+  
+  # Save plot as PDF
+  pdf_output_path <- sprintf("%s/charts/Procrustes_%s_Bray_Curtis.pdf", find_rstudio_root_file(), level)
+  ggsave(pdf_output_path, procrustes_plot, width = 8, height = 8)
+  
+  # Save plot as PPTX
+  pptx_output_path <- sprintf("%s/charts/Procrustes_%s_Bray_Curtis.pptx", find_rstudio_root_file(), level)
+  topptx(procrustes_plot, filename = pptx_output_path, height = 8, width = 8)
+  
+  # Print results
+  cat("Level:", level, "\n")
+  cat("Protest Correlation (r):", protest_corr, "\n")
+  cat("Protest P-value:", ifelse(protest_p_value < 0.001, "< 0.001", format(protest_p_value, digits = 3)), "\n\n")
+}
+```

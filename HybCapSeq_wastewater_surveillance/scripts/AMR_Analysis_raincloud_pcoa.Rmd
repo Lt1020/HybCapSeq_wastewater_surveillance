@@ -1,0 +1,251 @@
+---
+title: "Raincloud Plot and PCoA Analysis of Antibiotic Resistance Genes"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r}
+# Load required libraries
+library(tidyverse)
+library(ggplot2)
+library(vegan)
+library(ggpubr)
+library(RColorBrewer)
+library(scales)
+library(rprojroot)
+library(ggdist)  # For advanced distribution visualization
+library(eoffice) # For PPTX output
+
+# Set expanded CNS journal color scheme
+cns_colors <- c("#E64B35", "#4DBBD5", "#00A087", "#3C5488", "#F39B7F", "#8491B4", "#91D1C2", "#7E6148", "#B09C85", "#4a1486", "#e8743c", "#6a51a3", "#8264CC", "#3C5488B2", "#0072B2", "#4387B5", "#5D90BA", "#56B4E9", "#DC0000", "#4DBBD5B2", "#2EBEBE", "#009E73", "#167153", "#4c9568", "#356d67", "#74B346", "#7CC767", "#b0d45d", "#7fb961", "#8EA325", "#A9D179", "#91D1C2B2", "#84CAC0", "#F1CC2F", "#D8D155", "#ffe788", "#ffc556", "#F5AE6B", "#eb998b", "#cca69c", "#BCB8D3", "#8491B4B2", "#9e9ac8", "#737373", "#999999", "#bdbdbd", "#9ecae1", "#76afda", "#abddff", "#dcf2ff", "#fddbc8", "#252525", "#562e3c", "#7A142C", "#d73027", "#E64B35B2", "#223D6C", "#004529", "#42465c", "#7d4444", "#9e6c69", "#8c510a", "#A14462", "#a14462", "#bf812d", "#D55E00", "#E0367A", "#df65b0", "#CC79A7")
+
+# Read data files
+amr_file <- sprintf("%s/data/Nanning_YX_amr_genes_abundance_cap.tsv", find_rstudio_root_file())
+metadata_file <- sprintf("%s/data/wastewater_sample_metadata_table1.tsv", find_rstudio_root_file())
+
+# Import and preprocess data
+amr_data <- read_tsv(amr_file) %>%
+  mutate(across(everything(), ~ifelse(is.na(.), 0, .)))
+
+metadata <- read_tsv(metadata_file) %>%
+  mutate(across(everything(), ~ifelse(is.na(.), 0, .)))
+
+# Process gene, drug_class and mechanism columns to take the first name if semicolon-separated
+amr_data <- amr_data %>%
+  mutate(
+    gene = str_split(gene, ";") %>% map_chr(1) %>% str_trim(),
+    drug_class = str_split(drug_class, ";") %>% map_chr(1) %>% str_trim(),
+    mechanism = str_split(mechanism, ";") %>% map_chr(1) %>% str_trim()
+  )
+
+# Add Site information to amr_data by joining with metadata
+# Explicitly specify join keys to handle inconsistent column names
+amr_data <- amr_data %>%
+  left_join(metadata %>% select(sample_ID, Site), by = c("sampleID" = "sample_ID")) %>%
+  filter(!is.na(Site))  
+
+# Verify join success and add error handling
+if(!"Site" %in% colnames(amr_data)) {
+  stop("Failed to join metadata. 'Site' column not found in amr_data. Check column names in metadata file.")
+}
+
+# Calculate gene richness per sample (using rpm values)
+richness_data <- amr_data %>%
+  group_by(sampleID) %>%
+  summarise(richness = n_distinct(gene)) %>%
+  left_join(metadata, by = c("sampleID" = "sample_ID")) %>%
+  filter(!is.na(Site))
+
+# Create gene abundance matrix using rpm values
+gene_abundance <- amr_data %>%
+  select(sampleID, gene, rpm) %>%  # Use rpm column instead of reads
+  pivot_wider(names_from = gene, values_from = rpm, values_fill = 0) %>%
+  column_to_rownames(var = "sampleID")
+
+# Calculate Bray-Curtis dissimilarity matrix using rpm
+bray_matrix <- vegdist(gene_abundance, method = "bray")
+
+# Perform PCoA analysis using rpm-based dissimilarity matrix
+pcoa_result <- cmdscale(bray_matrix, k = 2, eig = TRUE)
+
+# Extract PCoA coordinates and variance explained
+pcoa_coords <- as.data.frame(pcoa_result$points)
+colnames(pcoa_coords) <- c("PC1", "PC2")
+pcoa_coords$sampleID <- rownames(pcoa_coords)
+pcoa_coords <- pcoa_coords %>%
+  left_join(metadata, by = c("sampleID" = "sample_ID")) %>%
+  filter(!is.na(Site))
+
+# Calculate variance explained by each PC
+explained_var <- pcoa_result$eig / sum(pcoa_result$eig) * 100
+explained_var <- round(explained_var[1:2], 2)
+
+# Calculate detection frequency for gene, drug_class and mechanism
+# Calculate the number of samples per site
+samples_per_site <- amr_data %>%
+  distinct(sampleID, Site) %>%  # Now Site column is available after joining
+  group_by(Site) %>%
+  summarise(num_samples = n())
+
+# Function to calculate detection frequency per site and aggregate low frequency items into "Other"
+calculate_frequency_per_site <- function(column_name, top_n = 9) {
+  column_name <- enquo(column_name)
+  
+  # Calculate detection frequency per site
+  freq_data <- amr_data %>%
+    group_by(Site, !!column_name) %>%
+    summarise(num_detected = n_distinct(sampleID), .groups = "drop") %>%
+    left_join(samples_per_site, by = "Site") %>%
+    mutate(frequency = num_detected / num_samples) %>%
+    ungroup()
+  
+  # For each site, identify top N items by frequency and aggregate others into "Other"
+  freq_data_aggregated <- freq_data %>%
+    group_by(Site) %>%
+    arrange(Site, desc(frequency)) %>%
+    mutate(rank = row_number()) %>%
+    mutate(item = ifelse(rank <= top_n, as.character(!!column_name), "Other")) %>%
+    group_by(Site, item) %>%
+    summarise(frequency = sum(frequency), .groups = "drop") %>%
+    ungroup()
+  
+  
+  freq_data_normalized <- freq_data_aggregated %>%
+    group_by(Site) %>%
+    mutate(normalized_frequency = frequency / sum(frequency)) %>%
+    ungroup()
+  
+  return(freq_data_normalized)
+}
+
+# Calculate frequency for gene, drug_class and mechanism per site
+gene_freq <- calculate_frequency_per_site(gene)
+drugclass_freq <- calculate_frequency_per_site(drug_class)
+mechanism_freq <- calculate_frequency_per_site(mechanism)
+
+# Sort sites by average richness
+site_avg_richness <- richness_data %>%
+  group_by(Site) %>%
+  summarise(avg_richness = mean(richness)) %>%
+  arrange(desc(avg_richness))
+
+# Convert Site to ordered factor
+richness_data$Site <- factor(richness_data$Site, levels = site_avg_richness$Site)
+pcoa_coords$Site <- factor(pcoa_coords$Site, levels = site_avg_richness$Site)
+gene_freq$Site <- factor(gene_freq$Site, levels = site_avg_richness$Site)
+drugclass_freq$Site <- factor(drugclass_freq$Site, levels = site_avg_richness$Site)
+mechanism_freq$Site <- factor(mechanism_freq$Site, levels = site_avg_richness$Site)
+
+# Plot 1: Advanced Raincloud plot for gene richness (using original reads, as richness is count of genes)
+p1 <- ggplot(richness_data, aes(x = richness, y = Site, fill = Site)) +
+  stat_halfeye(adjust = 0.5, width = 0.6, justification = -0.3, point_colour = NA, .width = 0, alpha = 0.4) +
+  geom_boxplot(width = 0.15, outlier.shape = NA, alpha = 0.5, color = "black") +
+  stat_summary(fun = median, geom = "text", 
+               aes(label = sprintf("Median: %.0f", after_stat(x))), 
+               hjust = -0.3, vjust = -2.5, color = "black", size = 3.5) +
+  scale_fill_manual(values = cns_colors) +
+  labs(x = "Resistance Gene Richness (Number of Unique Genes)", 
+       y = "Sampling Site", 
+       fill = "Sampling Site") +
+  theme_pubr() +
+  theme(
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title = element_text(size = 14, face = "bold"),
+    legend.position = "none"  # Remove legend
+  )
+
+# Plot 2: Simplified PCoA plot using rpm values
+p2 <- ggplot(pcoa_coords, aes(x = PC1, y = PC2, color = Site)) +
+  geom_point(size = 4, alpha = 0.8) +
+  labs(x = paste0("PC1 (", explained_var[1], "%)"), 
+       y = paste0("PC2 (", explained_var[2], "%)"), 
+       color = "Sampling Site") +
+  theme_pubr() +
+  theme(
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title = element_text(size = 14, face = "bold"),
+    legend.position = "right",  
+    legend.text = element_text(size = 12),
+    panel.border = element_rect(colour = "black", fill = NA, size = 0.5),
+    plot.title = element_blank()
+  ) +
+  scale_color_manual(values = cns_colors, limits = levels(richness_data$Site))
+
+# Function to create frequency plots with ordered stacking
+create_frequency_plot <- function(data, title, fill_title) {
+  # Get unique items and ensure "Other" is last
+  unique_items <- data %>%
+    distinct(item) %>%
+    arrange(ifelse(item == "Other", 1, 0), item) %>%
+    pull(item)
+  
+  # Create a color palette
+  color_palette <- c(cns_colors[1:length(unique_items)-1], "#999999")
+  
+  # Convert item to ordered factor based on frequency (descending)
+  plot_data <- data %>%
+    group_by(item) %>%
+    summarise(total_freq = sum(normalized_frequency)) %>%
+    arrange(desc(total_freq)) %>%
+    ungroup()
+  
+  ordered_items <- plot_data$item
+  
+  # Ensure "Other" is at the end
+  if("Other" %in% ordered_items) {
+    ordered_items <- ordered_items[ordered_items != "Other"]
+    ordered_items <- c(ordered_items, "Other")
+  }
+  
+  data$item <- factor(data$item, levels = ordered_items)
+  
+  # Create plot with ordered stacking using normalized frequency
+  p <- ggplot(data, aes(x = Site, y = normalized_frequency, fill = item)) +
+    geom_bar(stat = "identity", position = position_stack(reverse = TRUE)) +
+    scale_fill_manual(values = color_palette) +
+    labs(x = NULL, 
+         y = "Normalized Detection Frequency", 
+         fill = fill_title,
+         title = title) +
+    scale_y_continuous(labels = percent_format()) +  
+    theme_pubr() +
+    theme(
+      axis.text.x = element_text(size = 12, angle = 90, hjust = 1),
+      axis.text.y = element_text(size = 12),
+      axis.title = element_text(size = 14, face = "bold"),
+      legend.position = "right",
+      legend.text = element_text(size = 10),
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+    )
+  
+  return(p)
+}
+
+# Plot 3: Frequency distribution of top 9 genes per site
+p3 <- create_frequency_plot(gene_freq, "", "Resistance Gene")
+
+# Plot 4: Frequency distribution of top 9 drug classes per site
+p4 <- create_frequency_plot(drugclass_freq, "", "Drug Class")
+
+# Plot 5: Frequency distribution of top 9 mechanisms per site
+p5 <- create_frequency_plot(mechanism_freq, "", "Resistance Mechanism")
+
+# Save plots as PPTX
+pptx_filename_richness <- sprintf("%s/charts/resistance_gene_richness.pptx", find_rstudio_root_file())
+topptx(p1, filename = pptx_filename_richness, height = 6, width = 6)
+
+pptx_filename_pcoa <- sprintf("%s/charts/resistance_gene_pcoa.pptx", find_rstudio_root_file())
+topptx(p2, filename = pptx_filename_pcoa, height = 6, width = 8)
+
+pptx_filename_gene_freq <- sprintf("%s/charts/resistance_gene_frequency.pptx", find_rstudio_root_file())
+topptx(p3, filename = pptx_filename_gene_freq, height = 6, width = 5)
+
+pptx_filename_drugclass_freq <- sprintf("%s/charts/resistance_drugclass_frequency.pptx", find_rstudio_root_file())
+topptx(p4, filename = pptx_filename_drugclass_freq, height = 6, width = 6)
+
+pptx_filename_mechanism_freq <- sprintf("%s/charts/resistance_mechanism_frequency.pptx", find_rstudio_root_file())
+topptx(p5, filename = pptx_filename_mechanism_freq, height = 6, width = 6)
+```

@@ -1,0 +1,97 @@
+---
+title: "Comparison of Virus Abundance Detection between HybCapSeq and MetaT"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r }
+# Load required packages
+library(ggplot2)
+library(data.table)
+library(dplyr)
+library(rprojroot)
+library(eoffice)  # For PPTX output
+
+# Load data
+data_file <- sprintf(
+  "%s/data/HybCapSeq_vs_MetaT_group_sampleID_Total_RPKMF.tsv",
+  find_rstudio_root_file()
+)
+virus_data <- fread(data_file, sep = "\t", header = TRUE)
+
+# Convert 'group' column to factor with meaningful labels
+virus_data$group <- factor(virus_data$group, levels = c("Yes", "No"), 
+                          labels = c("Capture", "Non-capture"))
+
+# Calculate average RPKMF for each sample
+sample_avg_rpkmf <- virus_data %>%
+  group_by(sampleID) %>%
+  summarise(avg_rpkmf = mean(Total_RPKMF)) %>%
+  arrange(desc(avg_rpkmf))
+
+# Order samples by average RPKMF in descending order
+virus_data$sampleID <- factor(virus_data$sampleID, 
+                             levels = sample_avg_rpkmf$sampleID)
+
+# Create bar plot with logarithmic scale and ordered samples
+p_virus <- ggplot(virus_data, aes(x = sampleID, y = Total_RPKMF + 1, fill = group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  # Add strain count labels above bars
+  geom_text(aes(label = strains, y = Total_RPKMF + 1), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.5, size = 3) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12)) +
+  labs(
+    title = NULL,
+    x = "Sample ID",
+    y = "Total viral RPKMF (Number of viral strains detected)",
+    fill = "Detection method"
+  ) +
+  scale_y_continuous(
+    trans = "log10",
+    breaks = c(1, 10, 100, 1000, 10000),
+    labels = c("0", expression(10^1), expression(10^2), 
+               expression(10^3), expression(10^4)),
+    limits = c(1, 10000)
+  ) +
+  theme(
+    panel.background = element_rect(fill = "transparent", color = "gray"),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14, face = "bold"),
+    legend.justification = c(0.95, 0.95),
+    legend.position = c(0.95, 0.95),
+    legend.text = element_text(size = 14),
+    legend.title = element_text(size = 14, face = "bold"),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_manual(
+    values = c("Capture" = "#3573A1FF", "Non-capture" = "#3AAEADFF"),
+    labels = c("HybCapSeq", "MetaT")
+  )
+
+# Display the plot
+print(p_virus)
+
+# Save the plot as PDF and PPTX
+output_dir <- sprintf("%s/charts/", find_rstudio_root_file())
+ggsave(
+  filename = "HybCapSeq_vs_MetaT_VirusAbundance.pdf",
+  plot = p_virus,
+  path = output_dir,
+  width = 12,
+  height = 6
+)
+
+topptx(
+  p_virus,
+  filename = sprintf("%s/HybCapSeq_vs_MetaT_VirusAbundance.pptx", output_dir),
+  height = 6,
+  width = 12
+)
+
+
+```
+
+
+

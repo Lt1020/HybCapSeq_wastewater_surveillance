@@ -1,0 +1,337 @@
+---
+title: "Weekly Trends of Multiple Virus Cases and Their RPKMF in Different Districts"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r}
+# Load necessary packages
+library(ggplot2)
+library(data.table)
+library(dplyr)
+library(zoo)
+library(ggpubr)
+library(patchwork)
+library(lubridate)
+library(tidyquant)
+library(rprojroot)
+library(stringr)
+library(eoffice)  # For generating PPTX files
+
+# Set file paths
+case_data_table <- sprintf("%s/data/IAV_RoV_NoV_case_year_week_data.tsv", find_rstudio_root_file())
+rpkmf_data_table <- sprintf("%s/data/IAV_RoV_NoV_RPKMF_data.tsv", find_rstudio_root_file())
+
+# Read data
+case_data <- fread(case_data_table, sep = "\t", header = TRUE)
+rpkmf_data <- fread(rpkmf_data_table, sep = "\t", header = TRUE)
+
+# Define viruses to analyze
+viruses <- list(
+  list(name = "IAV", fullname = "Influenza A Virus"),
+  list(name = "RoV", fullname = "Rotavirus"),
+  list(name = "NoV", fullname = "Norovirus")
+)
+
+# Set统一颜色 for all viruses
+colors <- c("Cases" = "#d62728", "RPKMF" = "#00A087")
+
+# Convert date format
+convert_date <- function(date_str) {
+  result <- as.Date(date_str, format = "%Y/%m/%d")
+  if (any(is.na(result))) {
+    result <- as.Date(date_str, format = "%Y-%m-%d")
+  }
+  return(result)
+}
+
+# Process RPKMF data: convert date and extract year and week
+rpkmf_data <- rpkmf_data %>%
+  mutate(Date = convert_date(Date),
+         year = year(Date),
+         week = week(Date)) %>%
+  rename(District = District)
+
+# Identify unique districts present in the data
+target_districts <- unique(case_data$District)
+print(paste("Analyzing data for districts:", paste(target_districts, collapse = ", ")))
+
+# Filter data for the target districts
+case_data <- case_data %>% filter(District %in% target_districts)
+rpkmf_data <- rpkmf_data %>% filter(District %in% target_districts)
+
+# Aggregate RPKMF data by week and district (calculate mean RPKMF per week)
+processed_rpkmf_data <- rpkmf_data %>%
+  group_by(year, week, District) %>%
+  summarise(
+    IAV_RPKMF = mean(IAV_RPKMF, na.rm = TRUE),
+    RoV_RPKMF = mean(RoV_RPKMF, na.rm = TRUE),
+    NoV_RPKMF = mean(NoV_RPKMF, na.rm = TRUE),
+    Date = max(Date)
+  ) %>%  # Use the latest date in the week for plotting
+  ungroup()
+
+# Merge RPKMF data with case data
+merged_data <- left_join(processed_rpkmf_data, case_data, by = c("year", "week", "District"))
+
+# Create date labels (Year-WWeek)
+merged_data <- merged_data %>%
+  mutate(date_label = paste0(year, "-W", str_pad(week, width = 2, side = "left", pad = "0")))
+
+# Create overall aggregated data: sum of cases and mean of RPKMF across all districts
+overall_data <- merged_data %>%
+  group_by(year, week, Date, date_label) %>%
+  summarise(
+    IAV_cases = sum(IAV_cases, na.rm = TRUE),
+    RoV_cases = sum(RoV_cases, na.rm = TRUE),
+    NoV_cases = sum(NoV_cases, na.rm = TRUE),
+    IAV_RPKMF = mean(IAV_RPKMF, na.rm = TRUE),
+    RoV_RPKMF = mean(RoV_RPKMF, na.rm = TRUE),
+    NoV_RPKMF = mean(NoV_RPKMF, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Create correlation plot function for RPKMF vs Cases for a specific virus
+create_correlation_plot <- function(data, virus) {
+  # Extract virus-specific columns
+  x_col <- paste0(virus$name, "_RPKMF")
+  y_col <- paste0(virus$name, "_cases")
+  
+  # Filter out rows with missing values
+  plot_data <- data %>% select(all_of(c(x_col, y_col))) %>% na.omit()
+  
+  p_cor <- ggscatter(plot_data, x = x_col, y = y_col, 
+                     add = "reg.line", conf.int = TRUE, 
+                     cor.coef = TRUE, cor.method = "pearson", 
+                     cor.coef.size = 5, color = colors["RPKMF"], 
+                     xlab = paste0(virus$fullname, " RPKMF"), 
+                     ylab = paste0("Weekly ", virus$fullname, " Cases")) +
+    theme_bw(base_size = 14) +
+    theme(
+      axis.text = element_text(size = 12),
+      axis.title = element_text(size = 14, face = "bold"),
+      strip.text = element_text(size = 14, face = "bold"),
+      legend.position = "none"
+    )
+  return(p_cor)
+}
+
+# Create trend plot function for a specific virus in a district or overall
+create_trend_plot <- function(data, virus, title, is_overall = FALSE) {
+  # Extract virus-specific columns
+  rpkfm_col <- paste0(virus$name, "_RPKMF")
+  cases_col <- paste0(virus$name, "_cases")
+  
+  # Calculate scaling factors for visual balance
+  max_cases <- max(data[[cases_col]], na.rm = TRUE)
+  max_rpkfm <- max(data[[rpkfm_col]], na.rm = TRUE)
+  
+  # Handle case where max_rpkfm might be zero to avoid division by zero
+  if (max_rpkfm == 0) {
+    scaling_factor_rpkfm <- 1
+  } else {
+    scaling_factor_rpkfm <- max_cases / max_rpkfm * 0.8
+  }
+  
+  # Create trend plot with both metrics
+  p_trend <- ggplot(data, aes(x = as.Date(Date))) +
+    # Cases - primary y-axis
+    geom_point(aes(y = .data[[cases_col]], color = "Cases"), alpha = 0.6, size = 2) +
+    geom_ma(aes(y = .data[[cases_col]], color = "Cases"), ma_fun = SMA, n = 3, linetype = "solid", size = 1.2) +
+    
+    # RPKMF - secondary y-axis
+    geom_point(aes(y = .data[[rpkfm_col]] * scaling_factor_rpkfm, color = "RPKMF"), alpha = 0.6, size = 2) +
+    geom_ma(aes(y = .data[[rpkfm_col]] * scaling_factor_rpkfm, color = "RPKMF"), ma_fun = SMA, n = 3, linetype = "solid", size = 1.2) +
+    
+    # Set统一颜色
+    scale_color_manual(values = colors) +
+    
+    # Configure primary and secondary y-axes
+    scale_y_continuous(
+      name = ifelse(is_overall, 
+                   paste0("Total Weekly ", virus$fullname, " Cases (All Districts)"), 
+                   paste0("Weekly ", virus$fullname, " Cases")),
+      sec.axis = sec_axis(
+        ~ . / scaling_factor_rpkfm,
+        name = ifelse(is_overall, 
+                   paste0("Average ", virus$fullname, " RPKMF (All Districts)"), 
+                   paste0(virus$fullname, " RPKMF"))
+      )
+    ) +
+    
+    # Configure x-axis date format and breaks
+    scale_x_date(
+      labels = function(x) {
+        year <- year(x)
+        week <- week(x)
+        paste0(year, "-W", str_pad(week, width = 2, side = "left", pad = "0"))
+      },
+      date_breaks = "4 weeks"
+    ) +
+    
+    # Set theme and labels
+    theme_bw(base_size = 14) +
+    labs(color = "Metric") +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 0.5, size = 12),
+      axis.text.y = element_text(size = 12),
+      axis.title = element_text(size = 14, face = "bold"),
+      legend.title = element_text(size = 14, face = "bold"),
+      legend.text = element_text(size = 12),
+      legend.position = ifelse(is_overall, "right", "bottom"),
+      plot.title = element_text(hjust = 0.5, size = 16, face = "bold")
+    ) +
+    labs(
+      title = title,
+      x = "Year-Week",
+      color = "Metric"
+    )
+  
+  return(p_trend)
+}
+
+# Wrapper function for district trend plots
+create_district_trend_plot <- function(district_data, district, virus) {
+  create_trend_plot(district_data, virus, paste(virus$fullname, "in", district, "District"), is_overall = FALSE)
+}
+
+# Create combined plots for all districts for a specific virus
+create_combined_district_plots <- function(all_data, virus) {
+  # Split data by district
+  district_data_list <- split(all_data, all_data$District)
+  
+  # Generate a list of plots for each district
+  plot_list <- lapply(target_districts, function(district) {
+    district_data <- district_data_list[[district]]
+    p_trend <- create_district_trend_plot(district_data, district, virus) + 
+      theme(legend.position = "none")  # Remove legend from individual plots
+    return(p_trend)
+  })
+  
+  # Combine all plots into a single grid
+  combined_plots <- wrap_plots(plot_list, ncol = 2) +
+    plot_annotation(
+      title = paste(virus$fullname, "Cases vs RPKMF Across Districts"),
+      theme = theme(
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+      )
+    )
+  
+  # Extract legend from one of the plots
+  legend_plot <- create_district_trend_plot(district_data_list[[target_districts[1]]], target_districts[1], virus) +
+    theme(legend.position = "bottom")
+  legend <- get_legend(legend_plot)
+  
+  # Combine plots with legend
+  final_plot <- combined_plots / legend + plot_layout(heights = c(10, 1))
+  
+  return(final_plot)
+}
+
+# Create combined correlation plots for all districts for a specific virus
+create_combined_correlation_plots <- function(all_data, virus) {
+  # Split data by district
+  district_data_list <- split(all_data, all_data$District)
+  
+  # Generate a list of correlation plots for each district
+  plot_list <- lapply(target_districts, function(district) {
+    district_data <- district_data_list[[district]]
+    p_cor <- create_correlation_plot(district_data, virus) +
+      ggtitle(paste(district, "District")) +
+      theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"))
+    return(p_cor)
+  })
+  
+  # Determine layout based on number of districts
+  cols <- ifelse(length(target_districts) > 2, 2, length(target_districts))
+  
+  # Combine all correlation plots into a single plot
+  combined_correlation_plots <- wrap_plots(plot_list, ncol = cols) +
+    plot_annotation(
+      title = paste("Correlation Between", virus$fullname, "RPKMF and Weekly Cases Across Districts"),
+      theme = theme(
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+      )
+    )
+  
+  return(combined_correlation_plots)
+}
+
+# Create output directory if it doesn't exist
+chart_dir <- sprintf("%s/charts", find_rstudio_root_file())
+if (!dir.exists(chart_dir)) {
+  dir.create(chart_dir, recursive = TRUE)
+}
+
+# Generate plots for each district and each virus
+for (virus in viruses) {
+  for (district in target_districts) {
+    district_data <- merged_data %>% filter(District == district)
+    
+    # Skip if no data for this district
+    if (nrow(district_data) == 0) {
+      warning(paste("No data available for", district, "District and", virus$fullname))
+      next
+    }
+    
+    # Create trend plot
+    p_trend <- create_district_trend_plot(district_data, district, virus) +
+      theme(legend.position = "right")
+    
+    # Create correlation scatter plot
+    p_cor <- create_correlation_plot(district_data, virus)
+    
+    # Define common filenames for PDF and PPTX
+    base_filename_trend <- sprintf("%s/%s_%s_flu_trend", chart_dir, district, virus$name)
+    base_filename_cor <- sprintf("%s/%s_%s_rpkmf_correlation", chart_dir, district, virus$name)
+    
+    # Save as PDF
+    ggsave(sprintf("%s.pdf", base_filename_trend), p_trend, width = 14, height = 9)
+    ggsave(sprintf("%s.pdf", base_filename_cor), p_cor, width = 10, height = 8)
+    
+    # Save as PPTX with consistent filenames
+    topptx(p_trend, filename = sprintf("%s.pptx", base_filename_trend), height = 9, width = 14)
+    topptx(p_cor, filename = sprintf("%s.pptx", base_filename_cor), height = 8, width = 10)
+  }
+  
+  # Generate overall plots (aggregated across all districts) for this virus
+  # Create overall trend plot
+  p_overall_trend <- create_trend_plot(
+    overall_data, 
+    virus, 
+    paste("Overall", virus$fullname, "Cases vs Average RPKMF (Three Districts Combined)"), 
+    is_overall = TRUE
+  )
+  
+  # Create overall correlation plot
+  p_overall_cor <- create_correlation_plot(overall_data, virus) +
+    ggtitle(paste("Overall Correlation for", virus$fullname, "(Three Districts Combined)")) +
+    theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"))
+  
+  # Define filenames for overall plots
+  base_filename_overall_trend <- sprintf("%s/overall_%s_trend", chart_dir, virus$name)
+  base_filename_overall_cor <- sprintf("%s/overall_%s_rpkmf_correlation", chart_dir, virus$name)
+  
+  # Save overall plots as PDF
+  ggsave(sprintf("%s.pdf", base_filename_overall_trend), p_overall_trend, width = 14, height = 9)
+  ggsave(sprintf("%s.pdf", base_filename_overall_cor), p_overall_cor, width = 10, height = 8)
+  
+  # Save overall plots as PPTX
+  topptx(p_overall_trend, filename = sprintf("%s.pptx", base_filename_overall_trend), height = 9, width = 14)
+  topptx(p_overall_cor, filename = sprintf("%s.pptx", base_filename_overall_cor), height = 8, width = 10)
+  
+  # Create and save multi-district trend plot for this virus
+  p_multi_district <- create_combined_district_plots(merged_data, virus)
+  base_filename_multi <- sprintf("%s/all_districts_%s_trend_comparison", chart_dir, virus$name)
+  ggsave(sprintf("%s.pdf", base_filename_multi), p_multi_district, width = 20, height = 12)
+  topptx(p_multi_district, filename = sprintf("%s.pptx", base_filename_multi), height = 12, width = 20)
+  
+  # Create and save combined correlation plots for this virus
+  p_combined_correlation <- create_combined_correlation_plots(merged_data, virus)
+  base_filename_correlation <- sprintf("%s/all_districts_%s_correlation_comparison", chart_dir, virus$name)
+  ggsave(sprintf("%s.pdf", base_filename_correlation), p_combined_correlation, width = 20, height = 16)
+  topptx(p_combined_correlation, filename = sprintf("%s.pptx", base_filename_correlation), height = 16, width = 20)
+}
+
+```

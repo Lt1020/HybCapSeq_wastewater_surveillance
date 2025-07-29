@@ -1,0 +1,51 @@
+---
+title: "Virus RPKMF and Genome Copies Correlation Analysis"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r}
+# Load necessary libraries
+library(ggplot2)
+library(data.table)
+library(dplyr)
+library(ggpubr)
+library(rprojroot)
+library(eoffice) # Load eoffice library for PPTX output
+
+# Read the file path of the virus data
+virus_data_file <- sprintf("%s/data/viru_RPKMF_genome_copies.tsv", find_rstudio_root_file())
+
+# Load virus RPKMF and genome copies data
+virus_data <- fread(virus_data_file, sep = "\t", header = TRUE)
+
+# No log transformation, use the original values directly
+
+# Correlation plot with facet_wrap for different viruses
+correlation_plot <- ggscatter(
+  virus_data, x = "RPKMF", y = "genome_copies",
+  add = "reg.line", conf.int = TRUE,
+  cor.coef = TRUE, cor.method = "pearson", cor.p = TRUE,
+  cor.coef.size = 5, 
+  color = "#1F77B4"
+) +
+  facet_wrap(~ virus, scales = "free", ncol = 2) +
+  theme_bw(base_size = 14) +
+  theme(
+    axis.text = element_text(size = 12), 
+    axis.title = element_text(size = 14, face = "bold"),
+    strip.text = element_text(size = 14, face = "bold"),
+    legend.position = "top",
+    plot.margin = unit(c(0.5, 1.5, 0.5, 0.5), "cm") 
+  ) +
+  scale_x_continuous(name = "RPKMF") +
+  scale_y_continuous(name = "Genome Copies")
+
+# Save the correlation plot as a PDF file
+ggsave(sprintf("%s/charts/Virus_RPKMF_GenomeCopies_Correlation_facet.pdf", find_rstudio_root_file()), correlation_plot, width = 8, height = 8)
+
+# Save the correlation plot as a PPTX file
+pptx_filename <- sprintf("%s/charts/Virus_RPKMF_GenomeCopies_Correlation_facet.pptx", find_rstudio_root_file())
+topptx(correlation_plot, filename = pptx_filename, height = 8, width = 8)
+```

@@ -1,0 +1,146 @@
+---
+title: "Plot detected virus strains on tree-like object with prevalence and distributions labeling"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r}
+# Load packages
+library(ggplot2)
+library(data.table)
+library(stringr)
+library(dplyr)
+library(readxl)
+library(lubridate)
+library(tidyr)
+library(rprojroot)
+library(ade4)
+library(ggtree)
+library(wesanderson)
+library(eoffice)
+
+# Set paths and filenames
+virome_table <- sprintf("%s/data/wastewater_virome_abundance_table3.tsv", find_rstudio_root_file())
+metadata_table <- sprintf("%s/data/wastewater_sample_metadata_table3.tsv", find_rstudio_root_file())
+
+# Load files
+virome_dt <- fread(virome_table, sep = "\t", header = T)
+meta_dt <- fread(metadata_table, sep = "\t", header = T)
+
+# Create a hierarchical tax table for each detected strain
+hierarchical_dt <- virome_dt %>% 
+  distinct(species, genus, family, order, class, phylum) %>%
+  ungroup() %>%
+  filter(species != "NA") %>%
+  mutate(species = gsub("\\W+", "", species)) %>%
+  mutate(genus = gsub("\\W+", "", genus)) %>%
+  mutate(family = gsub("\\W+", "", family)) %>%
+  mutate(order = gsub("\\W+", "", order)) %>%
+  mutate(class = gsub("\\W+", "", class)) %>%
+  mutate(phylum = gsub("\\W+", "", phylum)) 
+
+hierarchical_df <- as.data.frame(hierarchical_dt) 
+hierarchical_df <- as.data.frame(unclass(hierarchical_df), stringsAsFactors = TRUE, row.names = "species")
+cols <- colnames(hierarchical_df)
+
+tax.phy <- taxo2phylog(as.taxo(hierarchical_df))
+
+# Summarize distinct counts of families, genera, species, and strains
+virome_dt %>% 
+  filter(strain != "NA") %>%
+  summarize(families = n_distinct(family),
+            genera = n_distinct(genus),
+            species = n_distinct(species),
+            strains = n_distinct(strain))
+
+# Group RPKMF by sample_ID and species
+species_abund_dt <- virome_dt %>%
+  group_by(sample_ID, species) %>%
+  summarize(RPKMF = sum(RPKMF)) %>%
+  ungroup()
+
+species_meta_dt <- merge(species_abund_dt, meta_dt, by = "sample_ID") %>%
+  group_by(City) %>%
+  mutate(total_samples = n_distinct(sample_ID)) %>%
+  ungroup() %>%
+  group_by(species, City, total_samples) %>%
+  summarize(n = n_distinct(sample_ID)) %>%
+  mutate(freq = n / total_samples) %>%
+  ungroup() %>%
+  complete(nesting(City, total_samples), species, fill = list(n = 0, freq = 0))
+
+important_info_dt <- species_meta_dt %>%
+  group_by(species) %>%
+  mutate(total_number = sum(n),
+         h_freq = freq / sum(freq)) %>%
+  filter(City == "Guangzhou") %>%
+  select(species, total_number, h_freq) %>%
+  ungroup() %>%
+  distinct() %>%
+  mutate(species = gsub("\\W+", "", species)) %>%
+  filter(species != "NA")
+
+important_info_df <- important_info_dt %>% 
+  ungroup() %>%
+  mutate(species = gsub("\\W+", "", species))
+important_info_df <- as.data.frame(important_info_df, stringsAsFactors = TRUE, row.names = "species")
+
+# Plot treelike object
+t1 <- ggtree(tax.phy, layout = "circular", color = "grey30")
+
+pal <- wes_palette("Zissou1", 2, type = "continuous")
+
+lab_t1 <- t1 %<+% important_info_dt + 
+  geom_tippoint(aes(color = h_freq, size = total_number), alpha = 0.8) +
+  scale_color_gradient2(
+    low = pal[1], high = pal[2], 
+    mid = "#F2E191", midpoint = 0.5,
+    breaks = c(0.20, 0.50, 0.80),
+    labels = c("Nanning only", "Equally Distributed", "Guangzhou only"),
+    guide = guide_colorbar(title = NULL)
+  ) +
+  scale_size_continuous(
+    breaks = c(1, 100, 200, 300),
+    name = "total detections \n(max 270)"
+  ) +
+  geom_cladelab(node = 247, label = "Hepadnaviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 251, label = "Retroviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 258, label = "Polyomaviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 262, label = "Papillomaviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 269, label = "Parvoviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 282, label = "Circoviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 288, label = "Reoviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 290, label = "Sedoreoviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 295, label = "Spinareoviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 304, label = "Hepeviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 310, label = "Togaviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 313, label = "Flaviviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 318, label = "Luteoviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 320, label = "Tombusviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 325, label = "Arenaviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 329, label = "Orthomyxoviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 335, label = "Paramyxoviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 340, label = "Pneumoviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 347, label = "Herpesviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 354, label = "Picobirnaviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 359, label = "Coronaviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 365, label = "Cremegaviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 367, label = "Mesoniviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 369, label = "Tobaniviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 373, label = "Caliciviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 376, label = "Dicistroviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 381, label = "Iflaviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 384, label = "Picornaviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 392, label = "Secoviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 398, label = "Solemoviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 403, label = "Astroviridae", hjust = -0.1, fontsize = 3) +
+  geom_cladelab(node = 410, label = "Adenoviridae", hjust = -0.1, fontsize = 3) +
+  theme(
+    legend.position = "bottom"
+  )
+
+# Output the plot to a PPTX file
+pptx_filename <- sprintf("%s/charts/virus_tax_tree_prevalence1.pptx", find_rstudio_root_file())
+topptx(lab_t1, filename = pptx_filename, height = 7, width = 9)
+```

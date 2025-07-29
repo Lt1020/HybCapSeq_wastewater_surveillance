@@ -1,0 +1,121 @@
+---
+title: "relative_abundance_barplot_analysis_family_levels"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r}
+# Load packages
+# Load packages
+library(ggplot2)
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(rprojroot)
+library(eoffice) # Load eoffice library for PPTX output
+
+### files
+virome_table <- sprintf(
+  "%s/data/wastewater_virome_abundance_table3.tsv", 
+  find_rstudio_root_file()
+)
+metadata_table <- sprintf(
+  "%s/data/wastewater_sample_metadata_table3.tsv", 
+  find_rstudio_root_file()
+)
+
+# Load virome abundance table
+virome_dt <- fread(virome_table, sep = "\t", header = TRUE)
+
+# Load metadata table
+meta_dt <- fread(metadata_table, sep = "\t", header = TRUE)
+
+# Merge virome and metadata tables by sample_ID
+virome_met_dt <- merge(virome_dt, meta_dt, by = "sample_ID")
+
+# Calculate total RPKMF per sample
+total_RPKMF_dt <- virome_met_dt %>%
+  group_by(sample_ID) %>%
+  summarize(total_RPKMF = sum(RPKMF), .groups = "drop")
+
+# Calculate relative abundance for each family per sample
+family_abundance_dt <- virome_met_dt %>%
+  group_by(sample_ID, family) %>%
+  summarize(family_RPKMF = sum(RPKMF), .groups = "drop") %>%
+  left_join(total_RPKMF_dt, by = "sample_ID") %>%  # Join total_RPKMF
+  mutate(relative_abundance = family_RPKMF / total_RPKMF) %>%
+  filter(!is.na(relative_abundance))  # Remove NA values
+
+# Merge relative abundance with metadata
+family_abundance_dt <- merge(family_abundance_dt, meta_dt, by = "sample_ID")
+
+# Create a new column combining City and Site
+family_abundance_dt$City_Site <- str_c(family_abundance_dt$City, ", ", family_abundance_dt$Site)
+
+# Define the custom order for City_Site
+custom_city_site_order <- c(
+  "Guangzhou, DXL", "Guangzhou, HCZ", "Guangzhou, RHN", 
+  "Guangzhou, SLZ", "Guangzhou, SY", "Guangzhou, ZHGC", 
+  "Guangzhou, LD", "Nanning, JN", "Nanning, NPJ", "Nanning, XXJ"
+)
+
+# Convert City_Site to a factor with the custom order
+family_abundance_dt$City_Site <- factor(
+  family_abundance_dt$City_Site,
+  levels = custom_city_site_order
+)
+
+# Calculate total relative abundance for each family across all samples
+family_total_abundance <- family_abundance_dt %>%
+  group_by(family) %>%
+  summarize(total_relative_abundance = sum(relative_abundance), .groups = "drop") %>%
+  arrange(desc(total_relative_abundance))  # Sort families by total relative abundance
+
+# Reorder the family factor based on total relative abundance
+family_abundance_dt$family <- factor(
+  family_abundance_dt$family,
+  levels = family_total_abundance$family  # Set levels in descending order
+)
+
+# Define CNS-compliant color palette with high distinguishability
+cns_colors <- c("#bdbdbd","#4DBBD5", "#00A087", "#3C5488", "#F39B7F", "#8491B4", "#91D1C2",  "#7E6148", "#B09C85", "#4a1486", "#e8743c","#6a51a3", "#8264CC", "#3C5488B2", "#0072B2", "#4387B5", "#5D90BA", "#56B4E9", "#DC0000","#4DBBD5B2", "#2EBEBE", "#009E73", "#167153", "#4c9568", "#356d67", "#74B346", "#7CC767", "#b0d45d","#E64B35", "#7fb961", "#8EA325", "#A9D179", "#91D1C2B2", "#84CAC0", "#F1CC2F", "#D8D155", "#ffe788", "#ffc556", "#F5AE6B", "#eb998b", "#cca69c", "#BCB8D3", "#8491B4B2", "#9e9ac8", "#737373", "#999999",  "#9ecae1", "#76afda", "#abddff", "#dcf2ff", "#fddbc8","#252525", "#562e3c", "#7A142C", "#d73027", "#E64B35B2",  "#223D6C", "#004529", "#42465c", "#7d4444", "#9e6c69", "#8c510a", "#A14462", "#a14462",  "#bf812d", "#D55E00",  "#E0367A", "#df65b0", "#CC79A7")
+
+family_barplot <- family_abundance_dt %>%
+  ggplot(aes(x = sample_ID, y = relative_abundance, fill = family)) +
+  geom_bar(stat = "identity", position = "stack") +
+  facet_wrap(~ City_Site, nrow = 1, scales = "free_x") +  # Facet by City_Site, one row
+  scale_y_continuous(breaks = c(0, 0.25, 0.50, 0.75, 1.00), 
+                     labels = c("0.00", "0.25", "0.50", "0.75", "1.00")) +
+  scale_fill_manual(values = cns_colors,  # Use CNS-compliant colors
+                    breaks = family_total_abundance$family) +  # Order legend by total relative abundance
+  labs(x = "Sample ID", 
+       y = "Relative Abundance", 
+       fill = "Viral Family") +
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14, face = "bold"),
+    axis.text.x = element_blank(),  # Hide x-axis labels
+    axis.ticks.x = element_blank(),  # Hide x-axis ticks
+    strip.text = element_text(size = 12, face = "bold"),  # Facet label style
+    legend.position = "bottom",  # Place legend at the bottom
+    legend.box = "horizontal",  # Horizontal legend layout
+    legend.text = element_text(size = 12),  # Legend text size
+    legend.title = element_text(size = 14, face = "bold"),  # Legend title style
+    legend.spacing.x = unit(0.5, 'cm'),
+    legend.spacing.y = unit(0.2, 'cm'),
+    legend.key.size = unit(0.4, "cm")
+  ) +
+  guides(fill = guide_legend(nrow = 4)) 
+
+# Save plot as PDF
+ggsave(family_barplot, 
+       file = sprintf("%s/charts/relative_abundance_barplot_family_level.pdf", find_rstudio_root_file()), 
+       width = 18, height = 8)
+
+# Save plot as PPTX
+pptx_filename <- sprintf("%s/charts/relative_abundance_barplot_family_level.pptx", find_rstudio_root_file())
+topptx(family_barplot, filename = pptx_filename, height = 8, width = 18)
+```

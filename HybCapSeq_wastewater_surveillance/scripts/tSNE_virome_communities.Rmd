@@ -1,0 +1,107 @@
+---
+title: "tSNE of wastewater virome communities by site, city, and date"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r}
+# Load packages
+library(ggplot2)
+library(data.table)
+library(stringr)
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(rprojroot)
+library(Rtsne)
+library(wesanderson)
+library(cowplot)
+library(eoffice) # Load eoffice library for PPTX output
+
+# Set paths and filenames
+### Files
+virome_table <- sprintf(
+  "%s/data/wastewater_virome_abundance_table3.tsv", 
+  find_rstudio_root_file()
+)
+metadata_table <- sprintf(
+  "%s/data/wastewater_sample_metadata_table3.tsv", 
+  find_rstudio_root_file()
+)
+
+# Load virome table, make wide
+virome_dt <- fread(virome_table, sep = "\t", header = TRUE)
+meta_dt <- fread(metadata_table, sep = "\t", header = TRUE)
+
+seqname_sID_wide_dt <- 
+  virome_dt %>% 
+  subset(select = c("sequence_name", "sample_ID", "RPKMF")) %>%
+  distinct(sequence_name, sample_ID, RPKMF) %>%
+  pivot_wider(names_from = sequence_name, values_from = RPKMF, values_fill = 0)
+
+sampleID_l <- seqname_sID_wide_dt$sample_ID
+
+seqname_sID_wide_dt <- seqname_sID_wide_dt %>% subset(select = -sample_ID)
+
+# Make tSNE data structure
+tephi_prcomp1 <- prcomp(log10(seqname_sID_wide_dt + 1))
+
+set.seed(243)
+emb <- Rtsne::Rtsne(tephi_prcomp1$x[, 1:10])
+embb <- emb$Y
+
+rownames(embb) <- sampleID_l
+embb_df <- as.data.frame(embb)
+embb_dt <- setDT(embb_df, keep.rownames = "sample_ID")
+embb_dt <- merge(embb_dt, meta_dt, by = "sample_ID")
+
+embb_dt$City_Site <- str_c(embb_dt$City, ", ", embb_dt$Site)
+embb_dt$Date <- as.Date(embb_dt$Date, "%Y/%m/%d")
+
+# Define CNS color scheme
+cns_colors <- c("#4DBBD5","#E64B35",  "#00A087", "#3C5488", "#F39B7F", 
+                "#8491B4", "#91D1C2", "#DC0000", "#7E6148", "#B09C85", 
+                "#4a1486", "#bdbdbd", "#CC79A7")
+
+# Plot tSNE with CNS color scheme
+# Select the first two colors from CNS palette for city plot
+city_pal <- cns_colors[1:2]
+
+city_tsnep <- embb_dt %>%
+  ggplot(aes(x = V1, y = V2, color = City, shape = City_Site)) +
+  geom_point(size = 3, alpha = 0.8) +
+  scale_shape_manual(values = c(15, 16, 17, 18, 3, 4, 8, 9, 11, 13)) +
+  scale_color_manual(values = city_pal) +
+  theme_bw() +
+  labs(x = "tSNE-1", y = "tSNE-2")
+
+print(city_tsnep)
+
+as.Date_origin <- function(x) {
+  as.Date(x, origin = '1970-01-01')
+}
+
+# Select two colors for gradient from CNS palette
+date_pal <- c("#4a1486", "#F39B7F")  # Blue to orange gradient
+
+date_tsnep <- embb_dt %>%
+  ggplot(aes(x = V1, y = V2, color = as.integer(Date), shape = City)) +
+  geom_point(size = 3, alpha = 0.8) +
+  scale_color_gradient(low = date_pal[1], high = date_pal[2], 
+                       labels = as.Date_origin, name = "Date") +
+  theme_bw() +
+  labs(x = "tSNE-1", y = "tSNE-2")
+
+print(date_tsnep)
+
+combp <- plot_grid(city_tsnep, date_tsnep, 
+                    align = "h", nrow = 1, ncol = 2)
+
+# Save the plot as a PDF file
+ggsave(combp, file = sprintf("%s/charts/tSNE_plots_city_date.pdf", find_rstudio_root_file()), width = 12, height = 6)
+
+# Save the plot as a PPTX file
+pptx_filename <- sprintf("%s/charts/tSNE_plots_city_date.pptx", find_rstudio_root_file())
+topptx(combp, filename = pptx_filename, height = 6, width = 12) 
+```

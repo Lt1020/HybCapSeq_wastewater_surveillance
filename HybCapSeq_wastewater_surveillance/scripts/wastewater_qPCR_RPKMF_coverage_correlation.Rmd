@@ -1,0 +1,443 @@
+---
+title: "Weekly Trends of COVID-19 Cases and Pathogen RPKMF in Different Districts"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r}
+# Load necessary packages
+library(ggplot2)
+library(data.table)
+library(dplyr)
+library(zoo)
+library(ggpubr)
+library(patchwork)
+library(lubridate)
+library(tidyquant)
+library(rprojroot)
+library(stringr)
+library(eoffice)  # For generating PPTX files
+
+# Set file paths
+case_data_table <- sprintf("%s/data/Nanning_YX_cases_data.tsv", find_rstudio_root_file())
+metadata_table <- sprintf("%s/data/wastewater_sample_metadata_table_Nanning_Guangzhou.tsv", find_rstudio_root_file())
+abundance_data_table <- sprintf("%s/data/wastewater_sample_qPCR_RPKMF_coverage_table.tsv", find_rstudio_root_file())
+
+# Read data
+case_data <- fread(case_data_table, sep = "\t", header = TRUE)
+metadata <- fread(metadata_table, sep = "\t", header = TRUE)
+abundance_data <- fread(abundance_data_table, sep = "\t", header = TRUE)
+
+# Convert date format
+convert_date <- function(date_str) {
+  result <- as.Date(date_str, format = "%Y/%m/%d")
+  if (any(is.na(result))) {
+    result <- as.Date(date_str, format = "%Y-%m-%d")
+  }
+  return(result)
+}
+
+# Process wastewater abundance data
+abundance_data <- abundance_data %>%
+  mutate(date = convert_date(date),
+         year = year(date),
+         week = week(date))
+
+# Merge abundance data with metadata to get district information
+abundance_data <- left_join(abundance_data, metadata[, c("sample_ID", "District")], by = "sample_ID")
+
+# Filter data for the four target districts
+target_districts <- c("Qingxiu", "Jiangnan", "High-tech", "Yuexiu")
+case_data <- case_data %>% filter(District %in% target_districts)
+abundance_data <- abundance_data %>% filter(District %in% target_districts)
+
+# Special handling for Yuexiu District: multiple sampling points on the same date
+yuexiu_data <- abundance_data %>% 
+  filter(District == "Yuexiu") %>%
+  group_by(year, week, date) %>%
+  summarise(Avg_GC = mean(Avg_GC, na.rm = TRUE),
+            RPKMF = mean(RPKMF, na.rm = TRUE),
+            coverage = max(coverage, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(District = "Yuexiu")
+
+# Process other districts: aggregate data by week
+other_districts_data <- abundance_data %>% 
+  filter(District != "Yuexiu") %>%
+  group_by(year, week, date, District) %>%
+  summarise(Avg_GC = mean(Avg_GC, na.rm = TRUE),
+            RPKMF = mean(RPKMF, na.rm = TRUE),
+            coverage = max(coverage, na.rm = TRUE)) %>%
+  ungroup()
+
+# Combine processed data
+processed_abundance_data <- bind_rows(yuexiu_data, other_districts_data)
+
+# Merge with case data
+merged_data <- left_join(processed_abundance_data, case_data, by = c("year", "week", "District"))
+
+# Create date labels (Year-WWeek)
+merged_data <- merged_data %>%
+  mutate(date_label = paste0(year, "-W", str_pad(week, width = 2, side = "left", pad = "0")))
+
+# Set colors for plotting
+colors <- c("Cases" = "#d62728", "Copies" = "#1f77b4", "RPKMF" = "#00A087", "Coverage" = "#4DBBD5")
+
+# Create correlation plot function for Avg_GC
+create_correlation_plot_avg_gc <- function(district_data, i) {
+  p_cor <- ggscatter(district_data, x = "Avg_GC", y = "cases", 
+                     add = "reg.line", conf.int = TRUE, 
+                     cor.coef = TRUE, cor.method = "pearson", 
+                     cor.coef.size = 5, color = "#1f77b4", 
+                     xlab = "Avg. genome copies/mL of SARS-CoV-2", 
+                     ylab = "Weekly COVID - 19 Cases") +
+    theme_bw(base_size = 14) +
+    theme(
+      axis.text = element_text(size = 12),
+      axis.title = element_text(size = 14, face = "bold"),
+      strip.text = element_text(size = 14, face = "bold"),
+      legend.position = "none"
+    )
+  return(p_cor)
+}
+
+# Create correlation plot function for RPKMF
+create_correlation_plot_rpkfm <- function(district_data, i) {
+  p_cor <- ggscatter(district_data, x = "RPKMF", y = "cases", 
+                     add = "reg.line", conf.int = TRUE, 
+                     cor.coef = TRUE, cor.method = "pearson", 
+                     cor.coef.size = 5, color = "#00A087", 
+                     xlab = "RPKMF of SARS-CoV-2", 
+                     ylab = "") +
+    theme_bw(base_size = 14) +
+    theme(
+      axis.text = element_text(size = 12),
+      axis.title = element_text(size = 14, face = "bold"),
+      strip.text = element_text(size = 14, face = "bold"),
+      legend.position = "none"
+    )
+  return(p_cor)
+}
+
+# Create correlation plot function for Coverage
+create_correlation_plot_coverage <- function(district_data, i) {
+  p_cor <- ggscatter(district_data, x = "coverage", y = "cases", 
+                     add = "reg.line", conf.int = TRUE, 
+                     cor.coef = TRUE, cor.method = "pearson", 
+                     cor.coef.size = 5, color = "#4DBBD5", 
+                     xlab = "Coverage of SARS-CoV-2", 
+                     ylab = "") +
+    theme_bw(base_size = 14) +
+    theme(
+      axis.text = element_text(size = 12),
+      axis.title = element_text(size = 14, face = "bold"),
+      strip.text = element_text(size = 14, face = "bold"),
+      legend.position = "none"
+    )
+  return(p_cor)
+}
+
+# Create trend plot function for each district
+create_district_trend_plot <- function(district_data, district) {
+  # Calculate scaling factors for visual balance
+  max_cases <- max(district_data$cases, na.rm = TRUE)
+  max_avg_gc <- max(district_data$Avg_GC, na.rm = TRUE)
+  max_rpkfm <- max(district_data$RPKMF, na.rm = TRUE)
+  max_coverage <- min(max(district_data$coverage, na.rm = TRUE), 100)
+  
+  # Determine unified scaling factors
+  scaling_factor_avg_gc <- max_cases / max_avg_gc * 0.8
+  scaling_factor_rpkfm <- scaling_factor_avg_gc * (max_avg_gc / max_rpkfm)
+  scaling_factor_coverage <- max_cases / 100
+  
+  # Create trend plot with all metrics
+  p_trend <- ggplot(district_data, aes(x = as.Date(date))) +
+    # Cases - primary y-axis
+    geom_point(aes(y = cases, color = "Cases"), alpha = 0.4, size = 1.5) +
+    geom_ma(aes(y = cases, color = "Cases"), ma_fun = SMA, n = 3, linetype = "solid", size = 1.2) +
+    
+    # Avg_GC - secondary y-axis
+    geom_point(aes(y = Avg_GC * scaling_factor_avg_gc, color = "Copies"), alpha = 0.4, size = 1.5) +
+    geom_ma(aes(y = Avg_GC * scaling_factor_avg_gc, color = "Copies"), ma_fun = SMA, n = 3, linetype = "solid", size = 1.2) +
+    
+    # RPKMF - secondary y-axis
+    geom_point(aes(y = RPKMF * scaling_factor_rpkfm, color = "RPKMF"), alpha = 0.4, size = 1.5) +
+    geom_ma(aes(y = RPKMF * scaling_factor_rpkfm, color = "RPKMF"), ma_fun = SMA, n = 3, linetype = "solid", size = 1.2) +
+    
+    # Coverage - secondary y-axis
+    geom_point(aes(y = coverage * scaling_factor_coverage, color = "Coverage"), alpha = 0.4, size = 1.5) +
+    geom_ma(aes(y = coverage * scaling_factor_coverage, color = "Coverage"), ma_fun = SMA, n = 3, linetype = "solid", size = 1.2) +
+    
+    # Set colors and labels
+    scale_color_manual(values = colors) +
+    
+    # Configure primary and secondary y-axes
+    scale_y_continuous(
+      name = "Weekly COVID - 19 Cases",
+      sec.axis = sec_axis(
+        ~ . * (max_avg_gc * scaling_factor_avg_gc / max_cases),
+        name = "Avg. genome copies/mL & RPKMF & Coverage of SARS-CoV-2",
+        breaks = function(range) {
+          coverage_levels <- c(0, 25, 50, 75, 100)
+          coverage_levels * max_avg_gc * scaling_factor_avg_gc / 100
+        },
+        labels = function(x) {
+          coverage_display <- x / (max_avg_gc * scaling_factor_avg_gc) * 100
+          coverage_display <- case_when(
+            coverage_display < 12.5 ~ 0,
+            coverage_display < 37.5 ~ 25,
+            coverage_display < 62.5 ~ 50,
+            coverage_display < 87.5 ~ 75,
+            TRUE ~ 100
+          )
+          
+          avg_gc_val <- round(x / scaling_factor_avg_gc)
+          rpkfm_val <- round(avg_gc_val * max_rpkfm / max_avg_gc, 2)
+          
+          paste0(avg_gc_val, " (", rpkfm_val, ", ", coverage_display, ")")
+        }
+      )
+    ) +
+    
+    # Configure x-axis date format and breaks
+    scale_x_date(
+      labels = function(x) {
+        year <- year(x)
+        week <- week(x)
+        paste0(year, "-W", str_pad(week, width = 2, side = "left", pad = "0"))
+      },
+      date_breaks = "4 weeks"
+    ) +
+    
+    # Set theme and labels
+    theme_bw(base_size = 14) +
+    labs(color = "Metric") +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 0.5, size = 12),
+      axis.text.y = element_text(size = 12),
+      axis.title = element_text(size = 14, face = "bold"),
+      legend.title = element_text(size = 14, face = "bold"),
+      legend.text = element_text(size = 12),
+      legend.position = "none",
+      plot.title = element_text(hjust = 0.5, size = 16, face = "bold")
+    ) +
+    labs(
+      title = paste(district, "District"),
+      x = "Year-Week",
+      color = "Metric"
+    )
+  
+  return(p_trend)
+}
+
+# Create and combine all district plots
+create_combined_district_plots <- function(all_data) {
+  # Split data by district
+  district_data_list <- split(all_data, all_data$District)
+  
+  # Generate a list of plots for each district
+  plot_list <- lapply(target_districts, function(district) {
+    district_data <- district_data_list[[district]]
+    p_trend <- create_district_trend_plot(district_data, district)
+    return(p_trend)
+  })
+  
+  # Combine all plots into a single grid
+  combined_plots <- wrap_plots(plot_list, ncol = 2) +
+    plot_annotation(
+      title = "Weekly COVID-19 Cases vs Wastewater Metrics Across Four Districts",
+      theme = theme(
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+      )
+    )
+  
+  # Extract legend from one of the plots
+  legend_plot <- create_district_trend_plot(district_data_list[[target_districts[1]]], target_districts[1]) +
+    theme(legend.position = "bottom")
+  legend <- get_legend(legend_plot)
+  
+  # Combine plots with legend
+  final_plot <- combined_plots / legend + plot_layout(heights = c(10, 1))
+  
+  return(final_plot)
+}
+
+# Create combined correlation plots for all districts
+create_combined_correlation_plots <- function(all_data) {
+  # Split data by district
+  district_data_list <- split(all_data, all_data$District)
+  
+  # Initialize empty list to store rows of plots
+  all_rows <- list()
+  
+  # Generate a row of plots for each district
+  for (i in seq_along(target_districts)) {
+    district <- target_districts[i]
+    district_data <- district_data_list[[district]]
+    
+    # Create the three correlation plots for this district
+    p_avg_gc <- create_correlation_plot_avg_gc(district_data, i)
+    p_rpkfm <- create_correlation_plot_rpkfm(district_data, i)
+    p_coverage <- create_correlation_plot_coverage(district_data, i)
+    
+    # Add district title to the first plot in the row
+    p_avg_gc_with_title <- p_avg_gc + 
+      ggtitle(paste(district, "District")) +
+      theme(plot.title = element_text(hjust = 0.5, size = 16, face = "bold"))
+    
+    # Combine the three plots into a row
+    row_plots <- p_avg_gc_with_title | p_rpkfm | p_coverage
+    
+    # Add the row to the list
+    all_rows[[i]] <- row_plots
+  }
+  
+  # Combine all rows into a single plot
+  combined_correlation_plots <- wrap_plots(all_rows, ncol = 1) +
+    plot_annotation(
+      title = "Correlation Between Wastewater Metrics and COVID-19 Cases Across Four Districts",
+      theme = theme(
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+      )
+    )
+  
+  return(combined_correlation_plots)
+}
+
+# Generate plots for each district
+for (i in seq_along(target_districts)) {
+  district <- target_districts[i]
+  district_data <- merged_data %>% filter(District == district)
+  
+  # Calculate scaling factors for visual balance
+  max_cases <- max(district_data$cases, na.rm = TRUE)
+  max_avg_gc <- max(district_data$Avg_GC, na.rm = TRUE)
+  max_rpkfm <- max(district_data$RPKMF, na.rm = TRUE)
+  max_coverage <- min(max(district_data$coverage, na.rm = TRUE), 100)
+  
+  # Determine unified scaling factors
+  scaling_factor_avg_gc <- max_cases / max_avg_gc * 0.8
+  scaling_factor_rpkfm <- scaling_factor_avg_gc * (max_avg_gc / max_rpkfm)
+  scaling_factor_coverage <- max_cases / 100
+  
+  # Create trend plot with all metrics
+  p_all <- ggplot(district_data, aes(x = as.Date(date))) +
+    # Cases - primary y-axis
+    geom_point(aes(y = cases, color = "Cases"), alpha = 0.4, size = 1.5) +
+    geom_ma(aes(y = cases, color = "Cases"), ma_fun = SMA, n = 3, linetype = "solid", size = 1.2) +
+    
+    # Avg_GC - secondary y-axis
+    geom_point(aes(y = Avg_GC * scaling_factor_avg_gc, color = "Copies"), alpha = 0.4, size = 1.5) +
+    geom_ma(aes(y = Avg_GC * scaling_factor_avg_gc, color = "Copies"), ma_fun = SMA, n = 3, linetype = "solid", size = 1.2) +
+    
+    # RPKMF - secondary y-axis
+    geom_point(aes(y = RPKMF * scaling_factor_rpkfm, color = "RPKMF"), alpha = 0.4, size = 1.5) +
+    geom_ma(aes(y = RPKMF * scaling_factor_rpkfm, color = "RPKMF"), ma_fun = SMA, n = 3, linetype = "solid", size = 1.2) +
+    
+    # Coverage - secondary y-axis
+    geom_point(aes(y = coverage * scaling_factor_coverage, color = "Coverage"), alpha = 0.4, size = 1.5) +
+    geom_ma(aes(y = coverage * scaling_factor_coverage, color = "Coverage"), ma_fun = SMA, n = 3, linetype = "solid", size = 1.2) +
+    
+    # Set colors and labels
+    scale_color_manual(values = colors) +
+    
+    # Configure primary and secondary y-axes
+    scale_y_continuous(
+      name = "Weekly COVID - 19 Cases",
+      sec.axis = sec_axis(
+        ~ . * (max_avg_gc * scaling_factor_avg_gc / max_cases),
+        name = "Avg. genome copies/mL & RPKMF & Coverage of SARS-CoV-2",
+        breaks = function(range) {
+          coverage_levels <- c(0, 25, 50, 75, 100)
+          coverage_levels * max_avg_gc * scaling_factor_avg_gc / 100
+        },
+        labels = function(x) {
+          coverage_display <- x / (max_avg_gc * scaling_factor_avg_gc) * 100
+          coverage_display <- case_when(
+            coverage_display < 12.5 ~ 0,
+            coverage_display < 37.5 ~ 25,
+            coverage_display < 62.5 ~ 50,
+            coverage_display < 87.5 ~ 75,
+            TRUE ~ 100
+          )
+          
+          avg_gc_val <- round(x / scaling_factor_avg_gc)
+          rpkfm_val <- round(avg_gc_val * max_rpkfm / max_avg_gc, 2)
+          
+          paste0(avg_gc_val, " (", rpkfm_val, ", ", coverage_display, ")")
+        }
+      )
+    ) +
+    
+    # Configure x-axis date format and breaks
+    scale_x_date(
+      labels = function(x) {
+        year <- year(x)
+        week <- week(x)
+        paste0(year, "-W", str_pad(week, width = 2, side = "left", pad = "0"))
+      },
+      date_breaks = "4 weeks"
+    ) +
+    
+    # Set theme and labels
+    theme_bw(base_size = 14) +
+    labs(color = "Metric") +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 0.5, size = 12),
+      axis.text.y = element_text(size = 12),
+      axis.title = element_text(size = 14, face = "bold"),
+      legend.title = element_text(size = 14, face = "bold"),
+      legend.text = element_text(size = 12),
+      legend.position = ifelse(i == length(target_districts), "right", "none"),
+      plot.title = element_text(hjust = 0.5, size = 16, face = "bold")
+    ) +
+    labs(
+      title = paste(district, "District - Weekly COVID-19 Cases vs Wastewater Metrics"),
+      x = "Year-Week",
+      color = "Metric"
+    )
+  
+  # Create three correlation scatter plots
+  p_cor_avg_gc <- create_correlation_plot_avg_gc(district_data, i)
+  p_cor_rpkfm <- create_correlation_plot_rpkfm(district_data, i)
+  p_cor_coverage <- create_correlation_plot_coverage(district_data, i)
+  
+  # Save plots as PDF files
+  chart_dir <- sprintf("%s/charts", find_rstudio_root_file())
+  if (!dir.exists(chart_dir)) {
+    dir.create(chart_dir, recursive = TRUE)
+  }
+  
+  # Define common filenames for PDF and PPTX
+  base_filename_trend <- sprintf("%s/%s_trend_analysis", chart_dir, district)
+  base_filename_avg_gc <- sprintf("%s/%s_cases_avg_gc_correlation", chart_dir, district)
+  base_filename_rpkfm <- sprintf("%s/%s_cases_rpkfm_correlation", chart_dir, district)
+  base_filename_coverage <- sprintf("%s/%s_cases_coverage_correlation", chart_dir, district)
+  
+  # Save as PDF
+  ggsave(sprintf("%s.pdf", base_filename_trend), p_all, width = 14, height = 9)
+  ggsave(sprintf("%s.pdf", base_filename_avg_gc), p_cor_avg_gc, width = 10, height = 8)
+  ggsave(sprintf("%s.pdf", base_filename_rpkfm), p_cor_rpkfm, width = 10, height = 8)
+  ggsave(sprintf("%s.pdf", base_filename_coverage), p_cor_coverage, width = 10, height = 8)
+  
+  # Save as PPTX with consistent filenames
+  topptx(p_all, filename = sprintf("%s.pptx", base_filename_trend), height = 9, width = 14)
+  topptx(p_cor_avg_gc, filename = sprintf("%s.pptx", base_filename_avg_gc), height = 8, width = 10)
+  topptx(p_cor_rpkfm, filename = sprintf("%s.pptx", base_filename_rpkfm), height = 8, width = 10)
+  topptx(p_cor_coverage, filename = sprintf("%s.pptx", base_filename_coverage), height = 8, width = 10)
+}
+
+# Create and save multi-district trend plot using the new approach
+p_multi_district <- create_combined_district_plots(merged_data)
+base_filename_multi <- sprintf("%s/all_districts_trend_comparison", chart_dir)
+ggsave(sprintf("%s.pdf", base_filename_multi), p_multi_district, width = 20, height = 12)
+topptx(p_multi_district, filename = sprintf("%s.pptx", base_filename_multi), height = 12, width = 20)
+
+# Create and save combined correlation plots
+p_combined_correlation <- create_combined_correlation_plots(merged_data)
+base_filename_correlation <- sprintf("%s/all_districts_correlation_comparison", chart_dir)
+ggsave(sprintf("%s.pdf", base_filename_correlation), p_combined_correlation, width = 24, height = 24)
+topptx(p_combined_correlation, filename = sprintf("%s.pptx", base_filename_correlation), height = 24, width = 24)
+
+```

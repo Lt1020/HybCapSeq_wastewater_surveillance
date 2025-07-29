@@ -1,0 +1,251 @@
+---
+title: "analyze strains/sample and rarefaction by site/city/total"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r}
+# Load packages
+library(ggplot2)
+library(data.table)
+library(stringr)
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(micropan)
+library(rprojroot)
+library(eoffice)
+library(ggdist)
+
+# Load data files
+virome_table <- sprintf(
+  "%s/data/wastewater_virome_abundance_table3.tsv", 
+  find_rstudio_root_file()
+)
+metadata_table <- sprintf(
+  "%s/data/wastewater_sample_metadata_table3.tsv", 
+  find_rstudio_root_file()
+)
+
+virome_dt <- fread(virome_table, sep = "\t", header = TRUE)
+meta_dt <- fread(metadata_table, sep = "\t", header = TRUE)
+
+# Remove rows with empty strain values
+virome_dt <- virome_dt %>% filter(!is.na(strain) & strain != "")
+
+# Merge virome and metadata
+virome_met_dt <- merge(virome_dt, meta_dt, by = "sample_ID")
+
+# Create combined City_Site variable
+virome_met_dt$City_Site <- str_c(virome_met_dt$City, ", ", virome_met_dt$Site)
+
+# CNS style color palette
+cns_colors <- c("#E64B35", "#4DBBD5", "#00A087", "#3C5488", "#F39B7F", "#8491B4", "#91D1C2", "#DC0000", "#7E6148", "#B09C85", "#4a1486", "#bdbdbd","#CC79A7")
+
+# Calculate median strains per sample and sort City_Site by median strains in descending order
+median_strains <- virome_met_dt %>%
+  group_by(sample_ID, City_Site) %>%
+  summarise(strains = n_distinct(strain)) %>%
+  group_by(City_Site) %>%
+  summarise(median_strains = median(strains), .groups = "drop") %>%
+  arrange(desc(median_strains))
+
+# Convert City_Site to ordered factor based on median strains
+virome_met_dt$City_Site <- factor(virome_met_dt$City_Site, levels = median_strains$City_Site)
+
+# Create raincloud plot with City_Site ordered by median strains
+raincloud_plot <- virome_met_dt %>%
+  group_by(sample_ID, City_Site) %>%
+  summarise(strains = n_distinct(strain), .groups = "drop") %>%
+  ggplot(aes(x = City_Site, y = strains, fill = City_Site)) +
+  stat_halfeye(
+    adjust = 0.5, width = 0.8, justification = -0.35,
+    color = NA, alpha = 0.4
+  ) +
+  geom_jitter(
+    width = 0.1, alpha = 0.5, size = 1, color = "grey20"
+  ) +
+  geom_boxplot(
+    width = 0.2, outlier.shape = NA, alpha = 0.5, color = "black"
+  ) +
+  stat_summary(
+    fun = median,
+    geom = "text",
+    aes(label = after_stat(y)),
+    vjust = 2, color = "black", size = 3.5
+  ) +
+  scale_fill_manual(values = cns_colors) +
+  coord_flip() +
+  scale_y_continuous(
+    expand = expansion(mult = c(0.2, 0.2))
+  ) +
+  theme_minimal() +
+  labs(
+    x = NULL,
+    y = "Strains detected per sample"
+  ) +
+  theme(
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title = element_text(size = 14, face = "bold"),
+    legend.position = "none"
+  )
+
+print(raincloud_plot)
+
+# Save raincloud plot as PDF
+ggsave(
+  raincloud_plot,
+  file = sprintf("%s/charts/strains_by_site.pdf", find_rstudio_root_file()),
+  width = 4,
+  height = 6
+)
+
+# Save raincloud plot as PPTX
+pptx_filename_strains <- sprintf(
+  "%s/charts/strains_by_site.pptx",
+  find_rstudio_root_file()
+)
+topptx(raincloud_plot, filename = pptx_filename_strains, height = 6, width = 3.5)
+
+# Prepare data for rarefaction analysis
+all_strain_wide <- 
+  virome_met_dt %>% 
+  group_by(strain, sample_ID) %>%
+  summarize(RPKMF = mean(RPKMF)) %>%
+  distinct(strain, sample_ID, RPKMF) %>%
+  pivot_wider(names_from = strain, values_from = RPKMF, values_fill = 0) %>%
+  subset(select = -sample_ID)
+
+# Perform rarefaction analysis for all samples
+mat_all_wide <- as.matrix(all_strain_wide)
+all_rare <- rarefaction(mat_all_wide, n.perm = 100)
+all_rare$avg <- rowMeans(all_rare[, -1], na.rm = TRUE)
+all_rare$max_g <- apply(all_rare[, -1], 1, max)
+all_rare$min_g <- apply(all_rare[, -1], 1, min)
+all_rare$type <- "City"
+all_rare$subset <- "All"
+
+# Rarefaction for Guangzhou city
+GZ_strain_wide <- 
+  virome_met_dt %>% 
+  filter(City == "Guangzhou") %>%
+  group_by(strain, sample_ID) %>%
+  summarize(RPKMF = mean(RPKMF)) %>%
+  distinct(strain, sample_ID, RPKMF) %>%
+  pivot_wider(names_from = strain, values_from = RPKMF, values_fill = 0) %>%
+  subset(select = -sample_ID)
+
+mat_GZ_wide <- as.matrix(GZ_strain_wide)
+GZ_rare <- rarefaction(mat_GZ_wide, n.perm = 100)
+GZ_rare$avg <- rowMeans(GZ_rare[, -1], na.rm = TRUE)
+GZ_rare$max_g <- apply(GZ_rare[, -1], 1, max)
+GZ_rare$min_g <- apply(GZ_rare[, -1], 1, min)
+GZ_rare$type <- "City"
+GZ_rare$subset <- "Guangzhou"
+
+# Rarefaction for individual sites in Guangzhou
+sites <- c("DXL", "HCZ", "RHN", "SLZ", "SY", "ZHGC","LD")
+site_rare_list <- list()
+
+for (site in sites) {
+  site_data <- 
+    virome_met_dt %>% 
+    filter(Site == site) %>%
+    group_by(strain, sample_ID) %>%
+    summarize(RPKMF = mean(RPKMF)) %>%
+    distinct(strain, sample_ID, RPKMF) %>%
+    pivot_wider(names_from = strain, values_from = RPKMF, values_fill = 0) %>%
+    subset(select = -sample_ID)
+  
+  mat_site_wide <- as.matrix(site_data)
+  site_rare <- rarefaction(mat_site_wide, n.perm = 100)
+  site_rare$avg <- rowMeans(site_rare[, -1], na.rm = TRUE)
+  site_rare$max_g <- apply(site_rare[, -1], 1, max)
+  site_rare$min_g <- apply(site_rare[, -1], 1, min)
+  site_rare$type <- "Site"
+  site_rare$subset <- paste("Guangzhou", site, sep = ", ")
+  
+  site_rare_list[[site]] <- site_rare
+}
+
+# Rarefaction for Nanning city and its sites
+# Nanning city
+NN_strain_wide <- 
+  virome_met_dt %>% 
+  filter(City == "Nanning") %>%
+  group_by(strain, sample_ID) %>%
+  summarize(RPKMF = mean(RPKMF)) %>%
+  distinct(strain, sample_ID, RPKMF) %>%
+  pivot_wider(names_from = strain, values_from = RPKMF, values_fill = 0) %>%
+  subset(select = -sample_ID)
+
+mat_NN_wide <- as.matrix(NN_strain_wide)
+NN_rare <- rarefaction(mat_NN_wide, n.perm = 100)
+NN_rare$avg <- rowMeans(NN_rare[, -1], na.rm = TRUE)
+NN_rare$max_g <- apply(NN_rare[, -1], 1, max)
+NN_rare$min_g <- apply(NN_rare[, -1], 1, min)
+NN_rare$type <- "City"
+NN_rare$subset <- "Nanning"
+
+# Nanning sites
+nanning_sites <- c("JN", "XXJ", "NPJ")
+nanning_site_rare_list <- list()
+
+for (site in nanning_sites) {
+  site_data <- 
+    virome_met_dt %>% 
+    filter(City == "Nanning" & Site == site) %>%
+    group_by(strain, sample_ID) %>%
+    summarize(RPKMF = mean(RPKMF)) %>%
+    distinct(strain, sample_ID, RPKMF) %>%
+    pivot_wider(names_from = strain, values_from = RPKMF, values_fill = 0) %>%
+    subset(select = -sample_ID)
+  
+  mat_site_wide <- as.matrix(site_data)
+  site_rare <- rarefaction(mat_site_wide, n.perm = 100)
+  site_rare$avg <- rowMeans(site_rare[, -1], na.rm = TRUE)
+  site_rare$max_g <- apply(site_rare[, -1], 1, max)
+  site_rare$min_g <- apply(site_rare[, -1], 1, min)
+  site_rare$type <- "Site"
+  site_rare$subset <- paste("Nanning", site, sep = ", ")
+  
+  nanning_site_rare_list[[site]] <- site_rare
+}
+
+# Combine all rarefaction results
+multi_rare <- rbind(
+  all_rare, GZ_rare, 
+  do.call(rbind, site_rare_list),
+  NN_rare, 
+  do.call(rbind, nanning_site_rare_list)
+)
+
+# Create rarefaction plot
+rarefaction_plot <- ggplot(multi_rare, aes(x = Genome, y = avg)) +
+  geom_ribbon(aes(x = Genome, ymin = min_g, ymax = max_g, fill = subset), alpha = 0.2) +
+  geom_line(aes(x = Genome, y = avg, col = subset), size = 1.2, alpha = 0.95) +
+  xlab("WWTP Samples Analyzed") + 
+  ylab("Number of Unique Strains Detected") +
+  facet_wrap(vars(type), nrow = 1, scales = "free_x") +  
+  scale_fill_manual(values = cns_colors) +  
+  scale_color_manual(values = cns_colors) +  
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title = element_text(size = 14, face = "bold"),
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 12)
+  )
+
+print(rarefaction_plot)
+
+# Save rarefaction plot as PDF
+ggsave(sprintf("%s/charts/strain_rarefaction_city_site1.pdf", find_rstudio_root_file()), width = 9, height = 6)
+
+# Save rarefaction plot as PPTX
+pptx_filename_rarefaction <- sprintf("%s/charts/strain_rarefaction_city_site1.pptx", find_rstudio_root_file())
+topptx(rarefaction_plot, filename = pptx_filename_rarefaction, height = 6, width = 9) 
+```

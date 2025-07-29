@@ -1,0 +1,147 @@
+---
+title: "Shannon Diversity by Site"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(data.table)
+library(stringr)
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(rprojroot)
+library(vegan)
+library(ggpubr)
+library(ggbeeswarm)
+library(gridExtra) 
+library(eoffice)
+
+# CNS journal color scheme
+cns_colors <- c("#E64B35", "#4DBBD5", "#00A087", "#3C5488", "#F39B7F", "#8491B4", "#91D1C2", "#DC0000", "#7E6148", "#B09C85")
+
+# Read data file paths
+virome_table <- sprintf("%s/data/wastewater_virome_abundance_table1.tsv", find_rstudio_root_file())
+metadata_table <- sprintf("%s/data/wastewater_sample_metadata_table1.tsv", find_rstudio_root_file())
+population_table <- sprintf("%s/data/wastewater_cachment_area_population.tsv", find_rstudio_root_file())
+
+# Read data
+virome_dt <- fread(virome_table, sep = "\t", header = TRUE)
+meta_dt <- fread(metadata_table, sep = "\t", header = TRUE)
+pop_dt <- fread(population_table, sep = "\t", header = TRUE)
+
+# Data processing
+seqname_sID_wide_dt <- virome_dt %>% 
+  select(sequence_name, sample_ID, RPKMF) %>%
+  distinct(sequence_name, sample_ID, RPKMF) %>%
+  pivot_wider(names_from = sequence_name, values_from = RPKMF, values_fill = 0)
+
+sampleID_l <- seqname_sID_wide_dt$sample_ID
+seqname_sID_wide_dt <- seqname_sID_wide_dt %>% select(-sample_ID)
+
+# Calculate Shannon diversity index
+shannon_d <- vegan::diversity(seqname_sID_wide_dt, index = "shannon")
+
+# Create a data frame with sample IDs and Shannon diversity indices
+sample_diversity <- data.frame(sample_ID = sampleID_l, shannon_d = shannon_d)
+# Merge sample diversity data and metadata
+sample_diversity_meta <- merge(sample_diversity, meta_dt, by = "sample_ID")
+
+# Filter out sites with less than 2 samples
+sample_diversity_meta <- sample_diversity_meta %>%
+  group_by(Site) %>%
+  filter(n() >= 2) %>%
+  ungroup()
+
+# Order sites by median Shannon diversity in descending order
+sample_diversity_meta$Site <- reorder(sample_diversity_meta$Site, sample_diversity_meta$shannon_d, FUN = median, decreasing = TRUE)
+
+# Create box plot without p-value display
+p <- ggplot(sample_diversity_meta, aes(x = Site, y = shannon_d, fill = Site)) +
+  geom_boxplot() +
+  geom_beeswarm(alpha = 0.6) +
+  labs(x = "Sampling Site", y = "Shannon Diversity") +
+  scale_fill_manual(values = cns_colors) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title = element_text(size = 14, face = "bold"),
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 12),
+    legend.position = "none"
+  )
+
+# Perform pairwise Wilcoxon tests and calculate adjusted p-values
+site_pairs <- combn(unique(sample_diversity_meta$Site), 2, simplify = FALSE)
+pairwise_result <- data.frame(
+  pairs = sapply(site_pairs, function(pair) paste(pair, collapse = " - ")),
+  p.value = sapply(site_pairs, function(pair) {
+    group1 <- sample_diversity_meta$shannon_d[sample_diversity_meta$Site == pair[1]]
+    group2 <- sample_diversity_meta$shannon_d[sample_diversity_meta$Site == pair[2]]
+    wilcox.test(group1, group2)$p.value
+  })
+)
+pairwise_result$p.adjusted <- p.adjust(pairwise_result$p.value, method = "BH")
+
+# Format p-values
+pairwise_result$p.value <- ifelse(pairwise_result$p.value < 0.001, 
+                                  format(pairwise_result$p.value, scientific = TRUE), 
+                                  as.character(round(pairwise_result$p.value, 3)))
+pairwise_result$p.adjusted <- ifelse(pairwise_result$p.adjusted < 0.001, 
+                                     format(pairwise_result$p.adjusted, scientific = TRUE), 
+                                     as.character(round(pairwise_result$p.adjusted, 3)))
+
+# Create table
+tab <- ggtexttable(pairwise_result[, c("pairs", "p.value", "p.adjusted")], 
+                   rows = NULL, 
+                   theme = ttheme("blank", base_size = 10),
+                   cols = c("Pairs", "P-value", "Adjusted P-value")) %>%
+  tab_add_hline(at.row = 1:2, row.side = "top", linewidth = 1)  %>% 
+  tab_add_hline(at.row = nrow(pairwise_result) + 1, row.side = "bottom", linewidth = 1) %>%
+  tab_add_title(text = "Pairwise Wilcoxon Test Results", face = "bold", size = 14)
+
+# Save box plot as PDF
+ggsave(sprintf("%s/charts/shannon_diversity_boxplot.pdf", find_rstudio_root_file()), p, width = 6, height = 6)
+
+# Save box plot as PPTX
+pptx_boxplot_filename <- sprintf("%s/charts/shannon_diversity_boxplot.pptx", find_rstudio_root_file())
+topptx(p, filename = pptx_boxplot_filename, height = 4, width = 6)
+
+# Save p-value table as PDF
+ggsave(sprintf("%s/charts/shannon_diversity_pvalue_table.pdf", find_rstudio_root_file()), tab, width = 4, height = max(3, nrow(pairwise_result) * 0.3))
+
+# Save p-value table as PPTX
+pptx_table_filename <- sprintf("%s/charts/shannon_diversity_pvalue_table.pptx", find_rstudio_root_file())
+topptx(tab, filename = pptx_table_filename, height = max(3, nrow(pairwise_result) * 0.3), width = 4)
+
+# Linear analysis between Shannon diversity and log10-transformed population
+linear_analysis <- merge(sample_diversity_meta, pop_dt, by = "Site") %>%
+  mutate(log10_Population = log10(Population)) %>%
+  group_by(City, Site, log10_Population) %>%
+  summarize(average_shan = mean(shannon_d)) %>%
+  ungroup() %>%
+  ggplot(aes(x = log10_Population, y = average_shan, color = City)) +
+  geom_point(size = 5, alpha = 0.7) + 
+  geom_smooth(method = "lm", se = F) + 
+  scale_color_manual(values = cns_colors) +
+  labs(x = "Log10 (Population)", y = "Average Shannon Diversity") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title = element_text(size = 14, face = "bold"),
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 12)
+  )
+
+# Save linear analysis plot as PDF
+ggsave(sprintf("%s/charts/average_shannon_diversity_by_log10_population.pdf", find_rstudio_root_file()), linear_analysis, width = 6, height = 4)
+
+# Save linear analysis plot as PPTX
+pptx_linear_filename <- sprintf("%s/charts/average_shannon_diversity_by_log10_population.pptx", find_rstudio_root_file())
+topptx(linear_analysis, filename = pptx_linear_filename, height = 4, width = 6)
+```

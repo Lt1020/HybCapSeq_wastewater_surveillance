@@ -1,0 +1,187 @@
+---
+title: "Comparison of Bacterial Classification between Captured and Non-captured Sequencing"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r}
+# Load necessary libraries
+library(tidyverse)
+library(ggplot2)
+library(patchwork)
+library(RColorBrewer)
+library(rprojroot)
+library(eoffice) # Load eoffice library for PPTX output
+
+# Read the file paths of the data
+cap_file <- sprintf("%s/data/metaphlan_cap_merged_abundance_table.txt", find_rstudio_root_file())
+nocap_file <- sprintf("%s/data/metaphlan_nocap_merged_abundance_table.txt", find_rstudio_root_file())
+
+# Read data, skip the first line
+cap_data <- read.table(cap_file, header = TRUE, skip = 1)
+nocap_data <- read.table(nocap_file, header = TRUE, skip = 1)
+
+# List of samples
+samples <- c("WS_0717_DXL", "WS_0717_HCZ", "WS_0717_RHN", "WS_0717_SLZ", "WS_0717_SY", "WS_0717_ZHGC",
+             "WS_0724_DXL", "WS_0724_HCZ", "WS_0724_RHN", "WS_0724_SLZ", "WS_0724_SY", "WS_0724_ZHGC",
+             "WS_0731_RHN", "WS_0731_SY", "WS_0731_ZHGC", "WS_0807_RHN", "WS_0807_SY", "WS_0807_ZHGC",
+             "WS_0814_RHN", "WS_0814_SY", "WS_0814_ZHGC")
+
+# Function to select samples and fill missing with zeros
+select_and_fill <- function(data) {
+  available_samples <- colnames(data)[-1]
+  missing_samples <- setdiff(samples, available_samples)
+  new_data <- data %>%
+    select(clade_name, all_of(intersect(samples, available_samples)))
+  for (sample in missing_samples) {
+    new_data[[sample]] <- 0
+  }
+  new_data <- new_data %>%
+    select(clade_name, all_of(samples))
+  return(new_data)
+}
+
+# Select samples from cap and nocap data
+cap_selected <- select_and_fill(cap_data)
+nocap_selected <- select_and_fill(nocap_data)
+
+# Function to extract level data
+extract_level <- function(data, level) {
+  level_patterns <- list(
+    "kingdom" = "k__[^|]+",
+    "phylum" = "p__[^|]+",
+    "class" = "c__[^|]+",
+    "order" = "o__[^|]+",
+    "family" = "f__[^|]+",
+    "genus" = "g__[^|]+",
+    "species" = "s__[^|]+")
+  
+  pattern <- level_patterns[[level]]
+  if (is.null(pattern)) {
+    stop("Invalid level specified.")
+  }
+  
+  data %>%
+    filter(str_detect(clade_name, pattern) & str_count(clade_name, "\\|") == which(names(level_patterns) == level) - 1) %>%
+    mutate(level_name = str_extract(clade_name, pattern)) %>%
+    select(-clade_name) %>%
+    group_by(level_name) %>%
+    summarise_all(sum) %>%
+    pivot_longer(-level_name, names_to = "sample", values_to = "abundance")
+}
+
+# Extract data for each level from cap and nocap data
+levels <- c("kingdom", "phylum", "class", "order", "family", "genus", "species")
+cap_level_data <- map(levels, ~extract_level(cap_selected,.x))
+nocap_level_data <- map(levels, ~extract_level(nocap_selected,.x))
+
+# Add a column to indicate capture status and combine data for each level
+combined_level_data <- map2(cap_level_data, nocap_level_data, function(cap, nocap) {
+  cap$capture_status <- "HybCapSeq"
+  nocap$capture_status <- "MetaT"
+  bind_rows(cap, nocap)
+})
+
+# Function to replace CFGB, OFGB, FGB, GGB, SGB and s__GGB32253_SGB56808
+replace_bins <- function(data, level) {
+  if (level == "class") {
+    data$level_name <- ifelse(str_detect(data$level_name, "c__CFGB"), "class-level genome bins", data$level_name)
+  } else if (level == "order") {
+    data$level_name <- ifelse(str_detect(data$level_name, "o__OFGB"), "order-level genome bins", data$level_name)
+  } else if (level == "family") {
+    data$level_name <- ifelse(str_detect(data$level_name, "f__FGB"), "family-level genome bins", data$level_name)
+  } else if (level == "genus") {
+    data$level_name <- ifelse(str_detect(data$level_name, "g__GGB"), "genus-level genome bins", data$level_name)
+  } else if (level == "species") {
+    data$level_name <- ifelse(str_detect(data$level_name, "s__GGB32253_SGB56808|s__SGB"), "species-level genome bins", data$level_name)
+  }
+  return(data)
+}
+
+# Apply replacement function to each level's data
+combined_level_data <- map2(combined_level_data, levels, replace_bins)
+
+# Thresholds for grouping low-abundance taxa
+thresholds <- c(0.1, 0.2, 0.5, 2, 2, 2)
+names(thresholds) <- levels[-1]
+
+# Function to group low-abundance taxa
+group_low_abundance <- function(data, level) {
+  if (level == "kingdom") {
+    return(data)
+  }
+  threshold <- thresholds[[level]]
+  other_name <- paste0("Other ", level, "s")
+  grouped <- data %>%
+    group_by(sample, capture_status) %>%
+    mutate(total_abundance = sum(abundance)) %>%
+    mutate(relative_abundance = abundance / total_abundance * 100) %>%
+    mutate(level_name = ifelse(relative_abundance < threshold, other_name, level_name)) %>%
+    group_by(sample, capture_status, level_name) %>%
+    summarise(abundance = sum(abundance),.groups = "drop")
+  return(grouped)
+}
+
+# Apply grouping function to each level's data
+combined_level_data <- map2(combined_level_data, levels, group_low_abundance)
+
+# Remove NA values from level_name
+combined_level_data <- map(combined_level_data, ~ filter(.x,!is.na(level_name)))
+
+# Remove k__Archaea from kingdom level if not present
+combined_level_data[[1]] <- combined_level_data[[1]] %>%
+  filter(level_name != "k__Archaea" | level_name %in% unique(.$level_name[.$abundance > 0]))
+
+# New color palette
+cns_colors <- c("#bdbdbd","#4DBBD5", "#00A087", "#3C5488", "#F39B7F", "#8491B4", "#91D1C2",  "#7E6148", "#B09C85", "#4a1486", "#e8743c","#6a51a3", "#8264CC", "#3C5488B2", "#0072B2", "#4387B5", "#5D90BA", "#56B4E9", "#4DBBD5B2", "#2EBEBE", "#009E73", "#167153", "#4c9568", "#356d67", "#74B346", "#7CC767", "#b0d45d","#E64B35", "#7fb961", "#8EA325", "#A9D179", "#91D1C2B2", "#84CAC0", "#F1CC2F", "#D8D155", "#ffe788", "#ffc556", "#F5AE6B", "#eb998b", "#cca69c", "#BCB8D3", "#8491B4B2", "#9e9ac8", "#737373", "#999999",  "#9ecae1", "#76afda", "#abddff", "#dcf2ff", "#fddbc8","#252525", "#562e3c", "#7A142C",  "#E64B35B2",  "#223D6C", "#004529", "#42465c", "#7d4444", "#9e6c69", "#8c510a", "#A14462", "#a14462",  "#bf812d", "#D55E00",  "#E0367A", "#df65b0", "#CC79A7")
+
+# Function to create sample ID mapping (S1, S2, ..., S21)
+create_sample_mapping <- function(samples) {
+  sample_mapping <- setNames(paste0("S", 1:length(samples)), samples)
+  return(sample_mapping)
+}
+
+# Create sample mapping
+sample_mapping <- create_sample_mapping(samples)
+
+# Function to plot stacked bar chart for a given level with new sample IDs
+plot_level_chart <- function(data, level) {
+  num_levels <- length(unique(data$level_name))
+  if (num_levels <= length(cns_colors)) {
+    colors <- cns_colors[1:num_levels]
+  } else {
+    warning("More levels than available colors. Some levels may have duplicate colors.")
+    colors <- rep(cns_colors, length.out = num_levels)
+  }
+  
+  # Map original sample names to new IDs (S1, S2, ..., S21)
+  data$sample_id <- sample_mapping[data$sample]
+  
+  ggplot(data, aes(x = factor(sample_id, levels = paste0("S", 1:length(samples))), y = abundance, fill = level_name)) +
+    geom_col() +
+    labs(x = "Sample", y = "Relative Abundance (%)", title = paste("Bacterial", level, "Abundance Comparison")) +
+    scale_fill_manual(values = colors) +
+    theme_bw(base_size = 14) +
+    theme(
+      axis.text = element_text(size = 12), 
+      axis.title = element_text(size = 14, face = "bold"),
+      axis.text.x = element_text(angle = 90, hjust = 1),
+      strip.text = element_text(size = 14, face = "bold")
+    )  +
+    facet_wrap(~ capture_status, nrow = 2)
+}
+
+# Plot and save charts for each level as PDF and PPTX
+map2(combined_level_data, levels, function(data, level) {
+  chart <- plot_level_chart(data, level)
+  
+  # Save as PDF
+  pdf_output_path <- sprintf("%s/charts/Bacterial_%s_Abundance_Comparison.pdf", find_rstudio_root_file(), level)
+  ggsave(pdf_output_path, chart, width = 16, height = 8)
+  
+  # Save as PPTX
+  pptx_output_path <- sprintf("%s/charts/Bacterial_%s_Abundance_Comparison.pptx", find_rstudio_root_file(), level)
+  topptx(chart, filename = pptx_output_path, height = 8, width = 16)
+})
+```

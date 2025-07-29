@@ -1,0 +1,105 @@
+---
+title: "Compare VirID Results between Cap and Nocap Groups"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r}
+# Load necessary libraries
+library(rprojroot)
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(eoffice)
+
+# Read the data
+metaT_data <- fread(sprintf("%s/data/merged_nocap_Contigs_classify_res_Fast.csv", find_rstudio_root_file()), sep = ",", header = TRUE)
+cap_data <- fread(sprintf("%s/data/merged_cap_Contigs_classify_res_Fast.csv", find_rstudio_root_file()), sep = ",", header = TRUE)
+
+# Select required columns
+selected_cols <- c("qlen", "Virus_Type", "Human", "Vertebrates", "Plant", "Pathogenicity_VIRUS_FAMILY")
+metaT_subset <- metaT_data %>% select(all_of(selected_cols))
+cap_subset <- cap_data %>% select(all_of(selected_cols))
+
+# Add group labels
+metaT_subset$group <- "MetaT"
+cap_subset$group <- "HybCapSeq"
+
+# Combine the data
+combined_data <- rbind(metaT_subset, cap_subset)
+
+# Filter out missing data
+combined_data <- combined_data %>% filter(!is.na(qlen), !is.na(Pathogenicity_VIRUS_FAMILY))
+
+# Calculate log10(qlen)
+combined_data$log10_qlen <- log10(combined_data$qlen)
+
+# Label host types
+combined_data <- combined_data %>%
+  mutate(Host_Type = case_when(
+    Human == 1 ~ "Human",
+    Vertebrates == 1 & Human == 0 ~ "Vertebrate",
+    Plant == 1 ~ "Plant",
+    TRUE ~ "Others"
+  ))
+
+# Specify host type order
+combined_data$Host_Type <- factor(combined_data$Host_Type, levels = c("Human", "Vertebrate", "Plant", "Others"))
+
+# Capitalize Virus_Type values
+combined_data$Virus_Type <- ifelse(combined_data$Virus_Type == "known", "Known",
+                                   ifelse(combined_data$Virus_Type == "noval", "Noval", combined_data$Virus_Type))
+
+# Group log10(qlen) values into bins
+bins <- c(2.5, 3.0, 3.5, 4.0, 4.5)
+combined_data$log10_qlen_group <- sapply(combined_data$log10_qlen, function(x) {
+  bins[which.min(abs(bins - x))]
+})
+
+# Calculate contig counts per group
+summary_data <- combined_data %>%
+  group_by(Pathogenicity_VIRUS_FAMILY, Virus_Type, Host_Type, group, log10_qlen_group) %>%
+  summarise(Contig_Number = n(), .groups = "drop")
+
+# CNS journal colors
+cns_colors <- c("Human" = "#E41A1C", "Vertebrate" = "#E69F00", "Plant" = "#4DAF4A", "Others" = "#377EB8")
+
+# Legend labels
+legend_labels <- c("Potential human pathogens", "Associated with other vertebrates", "Associated with plants", "Associated with others")
+
+# Bubble plot function
+plot_bubble <- function(data, title, show_legend = TRUE) {
+  p <- ggplot(data, aes(x = Pathogenicity_VIRUS_FAMILY, y = as.factor(log10_qlen_group), size = Contig_Number, color = Host_Type)) +
+    geom_point(alpha = 0.7) +
+    facet_grid(Virus_Type ~ Host_Type, scales = "free", space = "free") +
+    scale_color_manual(values = cns_colors, labels = legend_labels, breaks = c("Human", "Vertebrate", "Plant", "Others"), name = "Host Type") +
+    scale_size_continuous(range = c(2, 10)) + 
+    labs(title = title, y = "log10(nt length)", size = "Contig Number") +
+    theme_bw(base_size = 14) +
+    theme(
+      axis.text.x = element_text(angle = 60, hjust = 1),
+      strip.text.x = element_text(size = 12, face = "bold"),
+      strip.background = element_rect(fill = "gray90"),
+      legend.position = ifelse(show_legend, "right", "none"),
+      axis.title.x = element_blank()
+    )
+  return(p)
+}
+
+# Generate plots for each group
+cap_plot <- plot_bubble(summary_data %>% filter(group == "HybCapSeq"), "HybCapSeq", show_legend = FALSE)
+metaT_plot <- plot_bubble(summary_data %>% filter(group == "MetaT"), "MetaT")
+
+# Combine plots vertically
+final_plot <- ggarrange(cap_plot, metaT_plot, ncol = 1, labels = c("A", "B"), common.legend = TRUE, legend = "bottom")
+
+# Save as PDF
+pdf_save_path <- sprintf("%s/charts/VirID_cap_metaT_comparison2.pdf", find_rstudio_root_file())
+ggsave(pdf_save_path, plot = final_plot, width = 15, height = 10)
+
+# Save as PPTX
+pptx_save_path <- sprintf("%s/charts/VirID_cap_metaT_comparison2.pptx", find_rstudio_root_file())
+topptx(final_plot, filename = pptx_save_path, height = 10, width = 15)
+```

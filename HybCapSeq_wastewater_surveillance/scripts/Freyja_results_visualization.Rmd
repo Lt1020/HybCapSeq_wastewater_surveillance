@@ -1,0 +1,198 @@
+---
+title: "Freyja Analysis Results Visualization"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r}
+# Load necessary libraries
+library(readr)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(ggplot2)
+library(scales)
+library(zoo)
+library(rprojroot)
+library(eoffice)
+library(stringr)
+library(gridExtra)
+
+# Define CNS color palette
+cns_colors <- c("#bdbdbd","#4DBBD5", "#00A087", "#3C5488", "#F39B7F", "#8491B4", "#91D1C2",  "#7E6148", "#B09C85", "#4a1486", "#e8743c","#6a51a3", "#8264CC", "#3C5488B2", "#0072B2", "#4387B5", "#5D90BA", "#56B4E9", "#4DBBD5B2", "#2EBEBE", "#009E73", "#167153", "#4c9568", "#356d67", "#74B346", "#7CC767", "#b0d45d","#E64B35", "#7fb961", "#8EA325", "#A9D179", "#91D1C2B2", "#84CAC0", "#F1CC2F", "#D8D155", "#ffe788", "#ffc556", "#F5AE6B", "#eb998b", "#cca69c", "#BCB8D3", "#8491B4B2", "#9e9ac8", "#737373", "#999999",  "#9ecae1", "#76afda", "#abddff", "#dcf2ff", "#fddbc8","#252525", "#562e3c", "#7A142C",  "#E64B35B2",  "#223D6C", "#004529", "#42465c", "#7d4444", "#9e6c69", "#8c510a", "#A14462", "#a14462",  "#bf812d", "#D55E00",  "#E0367A", "#df65b0", "#CC79A7")
+
+# Read the file path of the data
+tNGS_lineage_file <- sprintf("%s/data/tNGS_lineage_abundances.tsv", find_rstudio_root_file())
+HybCapSeq_lineage_file <- sprintf("%s/data/HybCapSeq_lineage_abundances.tsv", find_rstudio_root_file())
+tNGS_summarized_file <- sprintf("%s/data/tNGS_summarized_abundances.tsv", find_rstudio_root_file())
+HybCapSeq_summarized_file <- sprintf("%s/data/HybCapSeq_summarized_abundances.tsv", find_rstudio_root_file())
+
+tNGS_metadata_file <- sprintf("%s/data/tNGS_times_metadata.csv", find_rstudio_root_file())
+HybCapSeq_metadata_file <- sprintf("%s/data/HybCapSeq_times_metadata.csv", find_rstudio_root_file())
+
+# Read metadata files using read_tsv to handle tab-separated values
+tNGS_metadata <- read_tsv(tNGS_metadata_file) %>%
+  mutate(Method = "tNGS")
+
+HybCapSeq_metadata <- read_tsv(HybCapSeq_metadata_file) %>%
+  mutate(Method = "HybCapSeq")
+
+# Combine metadata
+all_metadata <- bind_rows(tNGS_metadata, HybCapSeq_metadata) %>%
+  # Convert date to week format (e.g., 2024-W01)
+  mutate(
+    sample_collection_datetime = as.Date(sample_collection_datetime, format = "%Y/%m/%d"),
+    Week = paste0(year(sample_collection_datetime), "-W", sprintf("%02d", week(sample_collection_datetime)))
+  )
+
+# Function to process abundance files
+process_abundance_file <- function(file_path, method) {
+  # Read the TSV file
+  data <- read_tsv(file_path)
+  
+  # Convert to long format
+  long_data <- data %>%
+    pivot_longer(cols = -Sample, names_to = "Lineage", values_to = "Abundance") %>%
+    # Remove rows with zero abundance to reduce data size
+    filter(Abundance > 0) %>%
+    # Add method column
+    mutate(Method = method)
+  
+  return(long_data)
+}
+
+# Process all abundance files
+tNGS_lineage_data <- process_abundance_file(tNGS_lineage_file, "tNGS")
+HybCapSeq_lineage_data <- process_abundance_file(HybCapSeq_lineage_file, "HybCapSeq")
+tNGS_summarized_data <- process_abundance_file(tNGS_summarized_file, "tNGS")
+HybCapSeq_summarized_data <- process_abundance_file(HybCapSeq_summarized_file, "HybCapSeq")
+
+# Combine lineage data and add week information
+combined_lineage_data <- bind_rows(tNGS_lineage_data, HybCapSeq_lineage_data) %>%
+  left_join(all_metadata, by = c("Sample" = "Sample", "Method" = "Method")) %>%
+  select(Week, Lineage, Abundance, Method)
+
+# Combine summarized data and add week information
+combined_summarized_data <- bind_rows(tNGS_summarized_data, HybCapSeq_summarized_data) %>%
+  left_join(all_metadata, by = c("Sample" = "Sample", "Method" = "Method")) %>%
+  select(Week, Lineage, Abundance, Method)
+
+# Function to filter weeks where both methods have data
+filter_common_weeks <- function(data) {
+  # Get weeks where both methods have data
+  weeks_with_both_methods <- data %>%
+    group_by(Week, Method) %>%
+    summarise(count = n(), .groups = "drop") %>%
+    pivot_wider(names_from = Method, values_from = count, values_fill = 0) %>%
+    filter(tNGS > 0 & HybCapSeq > 0) %>%
+    pull(Week)
+  
+  # Filter original data to keep only those weeks
+  filtered_data <- data %>%
+    filter(Week %in% weeks_with_both_methods)
+  
+  return(filtered_data)
+}
+
+# Function to calculate relative abundance within each week and method
+calculate_relative_abundance <- function(data) {
+  relative_data <- data %>%
+    # Group by week, method, and lineage to sum abundances of the same lineage in the same week
+    group_by(Week, Method, Lineage) %>%
+    summarise(TotalAbundance = sum(Abundance), .groups = "drop") %>%
+    # Calculate total abundance per week and method
+    group_by(Week, Method) %>%
+    mutate(
+      WeekTotal = sum(TotalAbundance),
+      RelativeAbundance = TotalAbundance / WeekTotal
+    ) %>%
+    ungroup() %>%
+    select(Week, Lineage, Abundance = RelativeAbundance, Method)
+  
+  return(relative_data)
+}
+
+# Function to order lineages by average relative abundance
+order_lineages_by_abundance <- function(data) {
+  # Calculate average abundance for each lineage across all weeks and methods
+  lineage_order <- data %>%
+    group_by(Lineage) %>%
+    summarise(AvgAbundance = mean(Abundance), .groups = "drop") %>%
+    arrange(desc(AvgAbundance)) %>%
+    pull(Lineage)
+  
+  # Convert Lineage to ordered factor
+  data$Lineage <- factor(data$Lineage, levels = lineage_order)
+  
+  return(data)
+}
+
+# Filter data to include only weeks with both methods
+filtered_lineage_data <- filter_common_weeks(combined_lineage_data)
+filtered_summarized_data <- filter_common_weeks(combined_summarized_data)
+
+# Calculate relative abundance
+relative_lineage_data <- calculate_relative_abundance(filtered_lineage_data)
+relative_summarized_data <- calculate_relative_abundance(filtered_summarized_data)
+
+# Order lineages by average relative abundance
+ordered_lineage_data <- order_lineages_by_abundance(relative_lineage_data)
+ordered_summarized_data <- order_lineages_by_abundance(relative_summarized_data)
+
+# Function to create stacked bar plot with CNS colors and custom theme
+create_stacked_bar_plot <- function(data, filename_prefix) {
+  # Create the plot with CNS color palette and custom theme
+  plot <- ggplot(data, aes(x = Week, y = Abundance, fill = Lineage)) +
+    geom_bar(stat = "identity", position = "stack") +
+    facet_wrap(~ Method, ncol = 1) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(size = 12, angle = 45, hjust = 1, vjust = 1),
+      axis.text.y = element_text(size = 12),
+      axis.title = element_text(size = 14, face = "bold"),
+      legend.title = element_text(size = 14, face = "bold"),
+      legend.text = element_text(size = 12),
+      legend.position = "right",
+      plot.title = element_text(hjust = 0.5, size = 16, face = "bold")
+    ) +
+    labs(
+      title = NULL,
+      x = "Week",
+      y = "Relative Abundance"
+    ) +
+    scale_y_continuous(labels = percent_format()) +
+    scale_fill_manual(values = cns_colors)
+  
+  # Save as PDF
+  pdf_file <- sprintf("%s/charts/%s.pdf", find_rstudio_root_file(), filename_prefix)
+  ggsave(pdf_file, plot, width = 12, height = 8)
+  
+  # Save as PPTX using topptx
+  pptx_file <- sprintf("%s/charts/%s.pptx", find_rstudio_root_file(), filename_prefix)
+    topptx(plot, filename = pptx_file, height = 8, width = 12)
+  
+  return(plot)
+}
+
+# Create and save plots for ordered data
+lineage_plot <- create_stacked_bar_plot(
+  ordered_lineage_data, 
+  "lineage_relative_abundance_by_week_method"
+)
+
+summarized_plot <- create_stacked_bar_plot(
+  ordered_summarized_data, 
+  "summarized_relative_abundance_by_week_method"
+)
+
+# Display plots
+lineage_plot
+summarized_plot
+
+# Save processed data
+write_tsv(ordered_lineage_data, sprintf("%s/charts/lineage_relative_abundance_data.tsv", find_rstudio_root_file()))
+write_tsv(ordered_summarized_data, sprintf("%s/charts/summarized_relative_abundance_data.tsv", find_rstudio_root_file()))
+
+cat("Analysis completed. Plots saved to charts directory.\n")
+```
