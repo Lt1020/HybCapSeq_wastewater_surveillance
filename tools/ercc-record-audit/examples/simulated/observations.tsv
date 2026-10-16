@@ -1,0 +1,5 @@
+sample_id	ercc_id	aligned_bases	covered_bases	quant_include	exclusion_reason
+SIM-RNA	ERCC-SIM-001	100.0	80	1	
+SIM-RNA	ERCC-SIM-002	2000.0	900	1	
+SIM-RNA	ERCC-SIM-003	30000.0	1400	1	
+SIM-RNA	ERCC-SIM-004	400000.0	1800	1	

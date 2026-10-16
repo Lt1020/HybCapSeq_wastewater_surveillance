@@ -1,0 +1,3 @@
+sample_id	biological_id	replicate	condition	sample_role	rna_ng_ul	dna_ng_ul	library_input_ul	recorded_sample_mass_ng	ercc_volume_ul	ercc_dilution_factor	ercc_lot	total_effective_bases
+SIM-RNA	SIM-01	a	simulation	sample	12	8	5	100	2	1000	SIM-LOT	10000000
+SIM-NC	SIM-NC		blank	negative_control	0	0.166	14	2.324	0			
